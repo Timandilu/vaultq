@@ -1,0 +1,6 @@
+.venv/
+.vaultq/
+tmp_vault/
+__pycache__/
+*.pyc
+*.egg-info/

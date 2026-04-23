@@ -14,17 +14,16 @@ from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
+from vaultq.embedding_provider import ApiProviderConfig, resolve_llm_provider
+
 logger = logging.getLogger("vaultq.enrich")
 
-OPENROUTER_BASE_URL = os.getenv("KNOWLEDGE_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.getenv("KNOWLEDGE_MODEL", "google/gemma-4-31b-it:free").strip()
-OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "http://localhost")
-OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "VaultQ")
-OPENROUTER_TIMEOUT = float(os.getenv("KNOWLEDGE_TIMEOUT", "120"))
-OPENROUTER_RETRIES = max(1, int(os.getenv("KNOWLEDGE_RETRIES", "4")))
-OPENROUTER_MAX_OUTPUT_TOKENS = max(256, int(os.getenv("KNOWLEDGE_MAX_OUTPUT_TOKENS", "900")))
-KNOWLEDGE_TPM_LIMIT = max(1000, int(os.getenv("KNOWLEDGE_TPM_LIMIT", "15000")))
+LLM_RETRIES = max(1, int(os.getenv("LLM_RETRIES", os.getenv("KNOWLEDGE_RETRIES", "4"))))
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", os.getenv("KNOWLEDGE_TIMEOUT", "120")))
+LLM_MAX_OUTPUT_TOKENS = max(
+    256, int(os.getenv("LLM_MAX_OUTPUT_TOKENS", os.getenv("KNOWLEDGE_MAX_OUTPUT_TOKENS", "900")))
+)
+LLM_TPM_LIMIT = max(1000, int(os.getenv("LLM_TPM_LIMIT", os.getenv("KNOWLEDGE_TPM_LIMIT", "15000"))))
 
 TOKEN_PATTERN = re.compile(r"\b\w+\b", re.UNICODE)
 JSON_FENCE_PATTERN = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
@@ -238,26 +237,23 @@ def dedupe_knowledge_objects(objects: Sequence[Dict[str, Any]]) -> List[Dict[str
     return deduped
 
 
-def openrouter_headers() -> Dict[str, str]:
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    if OPENROUTER_SITE_URL:
-        headers["HTTP-Referer"] = OPENROUTER_SITE_URL
-    if OPENROUTER_APP_NAME:
-        headers["X-Title"] = OPENROUTER_APP_NAME
-    return headers
+def build_extractor(client: Optional[httpx.Client] = None) -> Optional["KnowledgeExtractor"]:
+    provider = resolve_llm_provider()
+    if not provider.api_key or not provider.model:
+        return None
+    http_client = client or httpx.Client()
+    return KnowledgeExtractor(http_client, TokenRateLimiter(LLM_TPM_LIMIT), provider)
 
 
 class KnowledgeExtractor:
-    def __init__(self, client: httpx.Client, rate_limiter: TokenRateLimiter, model: str) -> None:
+    def __init__(self, client: httpx.Client, rate_limiter: TokenRateLimiter, provider: ApiProviderConfig) -> None:
         self.client = client
         self.rate_limiter = rate_limiter
-        self.model = model
+        self.provider = provider
+        self.model = provider.model
 
     def _chat_completion(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        reserved_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_prompt) + OPENROUTER_MAX_OUTPUT_TOKENS
+        reserved_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_prompt) + LLM_MAX_OUTPUT_TOKENS
         self.rate_limiter.consume(reserved_tokens)
         payload = {
             "model": self.model,
@@ -266,29 +262,29 @@ class KnowledgeExtractor:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.1,
-            "max_tokens": OPENROUTER_MAX_OUTPUT_TOKENS,
+            "max_tokens": LLM_MAX_OUTPUT_TOKENS,
         }
         last_exc: Optional[Exception] = None
-        for attempt in range(1, OPENROUTER_RETRIES + 1):
+        for attempt in range(1, LLM_RETRIES + 1):
             try:
                 resp = self.client.post(
-                    f"{OPENROUTER_BASE_URL}/chat/completions",
-                    headers=openrouter_headers(),
+                    f"{self.provider.base_url}/chat/completions",
+                    headers=self.provider.headers,
                     json=payload,
-                    timeout=OPENROUTER_TIMEOUT,
+                    timeout=LLM_TIMEOUT,
                 )
                 if resp.status_code == 200:
                     content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
                     return extract_json_object(content)
                 if resp.status_code in (408, 409, 429, 500, 502, 503, 504):
-                    raise RuntimeError(f"OpenRouter transient error {resp.status_code}: {resp.text}")
-                raise RuntimeError(f"OpenRouter error {resp.status_code}: {resp.text}")
+                    raise RuntimeError(f"LLM transient error {resp.status_code}: {resp.text}")
+                raise RuntimeError(f"LLM error {resp.status_code}: {resp.text}")
             except Exception as exc:
                 last_exc = exc
-                if attempt >= OPENROUTER_RETRIES:
+                if attempt >= LLM_RETRIES:
                     break
-                time.sleep(min(2 ** attempt, 20))
-        raise RuntimeError("OpenRouter request failed") from last_exc
+                time.sleep(min(2**attempt, 20))
+        raise RuntimeError("LLM request failed") from last_exc
 
     def extract_chunk_objects(self, document: Dict[str, Any], chunk: ChunkRow) -> List[Dict[str, Any]]:
         system_prompt = (

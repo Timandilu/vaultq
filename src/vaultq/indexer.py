@@ -4,26 +4,16 @@ import fnmatch
 import hashlib
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-import httpx
 import yaml
 
 from vaultq.chunker import Chunk, chunk_markdown
-from vaultq.enrich import (
-    KNOWLEDGE_TPM_LIMIT,
-    OPENROUTER_API_KEY,
-    OPENROUTER_MODEL,
-    ChunkRow,
-    KnowledgeExtractor,
-    TokenRateLimiter,
-    dedupe_knowledge_objects,
-)
-from vaultq.store import connect, read_config, upsert_collection_rows
+from vaultq.enrich import ChunkRow, KnowledgeExtractor, build_extractor, dedupe_knowledge_objects
+from vaultq.store import connect, delete_qdrant_points, read_config, upsert_collection_rows
 
 logger = logging.getLogger("vaultq.indexer")
 
@@ -36,8 +26,10 @@ class IndexStats:
     documents_scanned: int = 0
     documents_indexed: int = 0
     documents_skipped: int = 0
+    documents_deleted: int = 0
     chunks_written: int = 0
     knowledge_objects_written: int = 0
+    qdrant_points_deleted: int = 0
 
 
 def _file_hash(text: str) -> str:
@@ -84,6 +76,22 @@ def _iter_markdown_files(root: Path, pattern: str, exclude_globs: Sequence[str])
         if _matches_excludes(rel, exclude_globs):
             continue
         yield path
+
+
+def _document_qdrant_point_ids(cur, document_id: int) -> List[str]:
+    cur.execute(
+        """
+        SELECT qdrant_point_id
+        FROM vq_chunks
+        WHERE document_id = %s AND qdrant_point_id IS NOT NULL
+        UNION
+        SELECT qdrant_point_id
+        FROM vq_knowledge_objects
+        WHERE document_id = %s AND qdrant_point_id IS NOT NULL
+        """,
+        (document_id, document_id),
+    )
+    return [str(row["qdrant_point_id"]) for row in cur.fetchall() if row.get("qdrant_point_id")]
 
 
 def _insert_document(cur, collection_id: int, root: Path, path: Path, force: bool) -> Optional[Dict[str, Any]]:
@@ -167,7 +175,7 @@ def _replace_chunks(cur, document: Dict[str, Any], chunks: Sequence[Chunk]) -> L
                 len(chunk.text),
                 chunk.start_line,
                 chunk.end_line,
-                json.dumps({"section_title": chunk.section_title}),
+                json.dumps({"section_title": chunk.section_title, "token_count": chunk.token_count}),
             ),
         )
         row = cur.fetchone()
@@ -258,8 +266,9 @@ def run_index(
     config = read_config(base_dir)
     stats = IndexStats(collections=len(collection_ids))
     extractor: Optional[KnowledgeExtractor] = None
-    if not skip_knowledge and OPENROUTER_API_KEY:
-        extractor = KnowledgeExtractor(httpx.Client(), TokenRateLimiter(KNOWLEDGE_TPM_LIMIT), OPENROUTER_MODEL)
+    if not skip_knowledge:
+        extractor = build_extractor()
+
     with connect() as conn:
         with conn.cursor() as cur:
             for collection in config.get("collections", []):
@@ -267,7 +276,7 @@ def run_index(
                     continue
                 root = Path(collection["path"]).expanduser().resolve()
                 exclude_globs = collection.get("exclude_globs", [])
-                files = list(_iter_markdown_files(root, collection.get("pattern", "**/*.md"), exclude_globs))
+                files = sorted(_iter_markdown_files(root, collection.get("pattern", "**/*.md"), exclude_globs))
                 if limit is not None:
                     files = files[:limit]
                 seen_rel_paths = {path.relative_to(root).as_posix() for path in files}
@@ -278,6 +287,10 @@ def run_index(
                     if document is None:
                         stats.documents_skipped += 1
                         continue
+
+                    existing_point_ids = _document_qdrant_point_ids(cur, int(document["id"]))
+                    if existing_point_ids:
+                        stats.qdrant_points_deleted += delete_qdrant_points(existing_point_ids)
 
                     chunks = chunk_markdown(document["markdown_text"])
                     chunk_rows = _replace_chunks(cur, document, chunks)
@@ -299,11 +312,19 @@ def run_index(
                     else:
                         stats.knowledge_objects_written += _remap_existing_knowledge_objects(cur, document["id"], chunk_rows)
 
-                cur.execute("SELECT id, rel_path FROM vq_documents WHERE collection_id = %s", (collection_ids[collection["name"]],))
+                cur.execute(
+                    "SELECT id, rel_path FROM vq_documents WHERE collection_id = %s",
+                    (collection_ids[collection["name"]],),
+                )
                 for row in cur.fetchall():
                     if row["rel_path"] not in seen_rel_paths:
+                        stale_point_ids = _document_qdrant_point_ids(cur, int(row["id"]))
+                        if stale_point_ids:
+                            stats.qdrant_points_deleted += delete_qdrant_points(stale_point_ids)
                         cur.execute("DELETE FROM vq_documents WHERE id = %s", (row["id"],))
+                        stats.documents_deleted += 1
         conn.commit()
+
     if extractor is not None:
         extractor.client.close()
     return stats

@@ -1,0 +1,27 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vaultq-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-vaultq}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASS:-password}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - vaultq_postgres_data:/var/lib/postgresql/data
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    container_name: vaultq-qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - vaultq_qdrant_data:/qdrant/storage
+
+volumes:
+  vaultq_postgres_data:
+  vaultq_qdrant_data:

@@ -1,109 +1,132 @@
 # VaultQ
 
-`vaultq` is a standalone CLI for turning any markdown vault into a retrieval-focused knowledge base backed by Postgres + Qdrant.
+Portable TUI, CLI, and MCP tooling for turning any markdown vault into a retrieval-grade knowledge system.
 
-It is designed for local notes, documentation repos, second-brain vaults, operating manuals, and project folders where plain vector search is not enough.
+VaultQ is built for the cases where plain keyword search is not enough and plain vector search is still too weak. It keeps markdown as the source of truth, stores canonical docs and chunks in Postgres, stores retrieval vectors in Qdrant, and exposes the corpus through a Textual operator UI, automation-friendly CLI, and FastMCP server.
 
-The retrieval stack is:
+It is designed to work on any vault path, not one machine. Collections are registered explicitly, config lives in `.vaultq/config.json` or `VQ_CONFIG_DIR`, and runtime/provider settings come from `.env`, `.env.local`, or `VQ_ENV_FILE`.
 
-- structure-aware markdown chunking
-- contextualized passages before indexing
-- BM25 sparse retrieval
-- dense semantic retrieval
-- ColBERT-style late-interaction multivector reranking
-- cross-encoder reranking
-- neighboring chunk windows on the final results
-- optional LLM enrichment into reusable knowledge objects
+The tested default provider path is Atlas-hosted Voyage models on `https://ai.mongodb.com/v1`. Direct Voyage endpoints on `https://api.voyageai.com/v1` are also supported. `vq doctor --live` detects the common mismatch where a key works on Atlas but not on the direct Voyage endpoint.
 
-The CLI shape is intentionally close to QMD, but the retrieval path follows the more advanced Markvis stack.
+## Why VaultQ
 
-## Why This Exists
-
-Most markdown search tools stop at one of these:
+Most note-search tools stop at one of these layers:
 
 - lexical search only
 - single-vector semantic search only
 - reranking without context-aware chunk preparation
+- local-only tooling that quietly assumes one fixed filesystem layout
 
-`vaultq` is built for the case where retrieval quality matters more than minimal infrastructure.
+VaultQ is aimed at a higher bar:
 
-The main design choices are:
+- heading-aware, token-aware markdown chunking
+- contextual Voyage-style embeddings from raw ordered chunk groups
+- lexical retrieval that still works in a stock local install
+- dense retrieval in the same collection
+- reciprocal-rank fusion
+- reranking
+- neighboring chunk windows on final results
+- optional grounded LLM extraction into reusable knowledge objects
+- TUI for operators, CLI for scripts, MCP for agents
 
-- keep markdown as the source of truth
-- preserve heading and section structure during chunking
-- add collection, path, context, and summary metadata into the embedded passage text
-- combine lexical and semantic retrieval instead of betting on one
-- use late interaction and reranking where semantic precision matters
-- keep LLM enrichment optional so you can bootstrap cheaply and upgrade later
+## System Overview
 
-## Feature Set
+```mermaid
+flowchart TD
+    Vault["Any markdown vault<br/>notes, docs, second brain, runbooks"] --> Indexer["Indexer + Chunker"]
+    Contexts["Collection contexts<br/>path-prefix metadata"] --> Indexer
+    Indexer --> PG["Postgres<br/>documents, chunks, knowledge objects"]
+    Indexer --> Pending["Pending rows"]
+    Pending --> Embedder["Embedding pipeline"]
+    Embedder --> Qdrant["Qdrant<br/>dense + sparse vectors"]
 
-- Index any markdown directory with glob-based include and exclude rules
-- Attach hierarchical context to whole collections or subpaths
-- Chunk notes with heading-aware and paragraph-aware splitting
-- Store original markdown, chunks, and derived knowledge objects in Postgres
-- Store dense, sparse, and multivector representations in Qdrant
-- Query with `search`, `vsearch`, or full `query`
-- Return neighboring chunk windows instead of isolated snippets
-- Rechunk without fully re-running LLM extraction when source text has not materially changed
+    User["Operator"] --> TUI["Textual TUI"]
+    Script["Automation"] --> CLI["CLI"]
+    Agent["LLM / tool client"] --> MCP["FastMCP server"]
 
-## Architecture
+    TUI --> Core["VaultQ core"]
+    CLI --> Core
+    MCP --> Core
+    Core --> PG
+    Core --> Qdrant
+```
 
-`vaultq` has four major layers:
+## Retrieval Stack
 
-1. Ingest
+VaultQ follows the reference pattern that performed best in the sibling retrieval projects:
 
-- reads markdown files
-- parses YAML frontmatter
-- stores canonical source documents in Postgres
+1. Markdown is chunked by structure first, not by blind fixed-size splits.
+2. Chunk groups from the same source document are sent together for contextual embeddings when the provider supports it.
+3. Dense retrieval runs in Qdrant and the lexical lane runs either through Postgres FTS by default or Qdrant sparse vectors when explicitly enabled.
+4. Results are fused with reciprocal-rank fusion instead of picking one scoring method.
+5. A reranker refines the candidate set.
+6. Final hits are expanded with neighboring chunks so answers are not returned as isolated fragments.
 
-2. Chunking
+That sequence is what makes the system meaningfully better than a simple embeddings-only note search.
 
-- splits by markdown heading boundaries first
-- then paragraphs
-- then sentences as fallback
-- keeps line ranges so chunk-to-source and knowledge-to-chunk remapping remain possible
+## Ingest And Embedding Flow
 
-3. Enrichment
+```mermaid
+flowchart LR
+    A["Markdown files"] --> B["Parse frontmatter + body"]
+    B --> C["Heading-aware / paragraph-aware chunking"]
+    C --> D["Store canonical docs + chunks in Postgres"]
+    D --> E["Optional grounded LLM extraction<br/>concepts, methods, SOPs, summaries"]
+    E --> F["Pending rows"]
+    F --> G["Group ordered chunks by source document"]
+    G --> H["Voyage contextual embeddings<br/>or standard embedding fallback"]
+    F --> I["Lexical lane<br/>Postgres default, Qdrant sparse optional"]
+    H --> J["Adaptive Qdrant upsert batching"]
+    J --> K["Hybrid-ready Qdrant collection"]
+    I --> K
+```
 
-- optional OpenRouter pass
-- creates:
-  - `segment_summary`
-  - `document_summary`
-  - `concept`
-  - `principle`
-  - `method`
-  - `sop`
+## Retrieval Flow
 
-4. Retrieval
+```mermaid
+flowchart LR
+    Q["User query"] --> DQ["Dense query encoding"]
+    Q --> SQ["Lexical query lane"]
+    DQ --> DS["Dense search in Qdrant"]
+    SQ --> SS["Postgres FTS by default<br/>Qdrant sparse when enabled"]
+    DS --> F["RRF fusion"]
+    SS --> F
+    F --> R["Rerank top candidates"]
+    R --> N["Neighbor-window expansion"]
+    N --> O["Result contract"]
+    O --> TUI["TUI"]
+    O --> CLI["CLI"]
+    O --> MCP["MCP tools"]
+```
 
-- embeds contextualized chunks and knowledge objects
-- indexes:
-  - dense vectors
-  - BM25 sparse vectors
-  - late-interaction multivectors
-- executes:
-  - BM25 retrieval
-  - dense retrieval
-  - RRF fusion
-  - late-interaction rerank
-  - cross-encoder rerank
-  - neighboring window expansion
+## What The Tool Actually Provides
 
-## Requirements
+- `vq` with no arguments launches the Textual TUI
+- `vq init` bootstraps local config, Postgres schema, and a compatible Qdrant collection
+- `vq collection add` registers any markdown root path
+- `vq context add` attaches inherited context to a whole collection or path prefix
+- `vq index` scans changed markdown files, rewrites chunks, and optionally writes knowledge objects
+- `vq embed` embeds any pending chunks and knowledge objects
+- `vq watch` keeps polling the vault, auto-indexes changed markdown, and drains embedding batches in the background
+- `vq query` runs hybrid retrieval with reranking
+- `vq search` runs keyword retrieval only
+- `vq vsearch` runs dense retrieval only
+- `vq fetch` returns a single indexed point with expanded neighboring context
+- `vq get` returns the stored source document, its chunks, and its knowledge objects
+- `vq mcp` runs the retrieval surface as an MCP server
 
-- Python `3.11+`
-- Postgres
-- Qdrant
-- embedding provider compatible with OpenAI-style `/embeddings`
-- optional OpenRouter key for enrichment
+## Standalone And Portable By Design
 
-The default environment assumes a local stack similar to the existing AI workspace:
+VaultQ is not wired to one workstation:
 
-- Postgres on `127.0.0.1:5440`
-- Qdrant on `127.0.0.1:6338`
+- collection roots are stored as explicit paths you choose
+- config defaults to a local `.vaultq/config.json` in the working directory
+- `VQ_CONFIG_DIR` can move config anywhere
+- `VQ_ENV_FILE` can point to any runtime env file
+- database and Qdrant addresses come from environment variables
+- provider settings are generic OpenAI-compatible HTTP settings rather than project-specific glue
 
-You can override all of that in `.env`.
+The only assumption is that you provide a running Postgres, a running Qdrant, and the provider credentials you want to use.
 
 ## Installation
 
@@ -116,295 +139,278 @@ source .venv/bin/activate
 pip install -e .
 
 cp .env.example .env
+docker compose up -d
 ```
 
-If you already use a shared embedding env one directory above the repo as `.ai-embedding.env`, `vaultq` will load that automatically.
+The bundled `docker-compose.yml` starts a local Postgres + Qdrant stack with the same defaults used by `.env.example`.
 
 ## Quick Start
 
-```bash
-vq init
-
-vq collection add ~/notes --name notes
-vq context add vaultq://notes "Personal markdown vault"
-vq context add vaultq://notes/projects "Project notes and runbooks"
-
-vq index --skip-knowledge
-vq embed
-
-vq query "how do I run the deployment process?"
-```
-
-That is the cheapest first pass:
-
-- no OpenRouter calls
-- chunking only
-- retrieval from contextualized markdown chunks
-
-## Full Enrichment Pass
-
-If `OPENROUTER_API_KEY` is set, run:
-
-```bash
-vq index
-vq embed
-```
-
-That adds document-level and section-level abstractions on top of the raw chunks.
-
-The knowledge layer is useful when you want retrieval over:
-
-- reusable principles
-- named methods
-- SOPs
-- concepts mentioned across many notes
-
-## Command Reference
-
-### Initialize
+### 1. Initialize the local runtime
 
 ```bash
 vq init
-vq init --reset
+vq doctor --live
 ```
 
-`vq init` creates:
-
-- local `.vaultq/config.json`
-- Postgres schema
-- Qdrant collection with dense + sparse + multivector configuration
-
-Use `--reset` only when you want to recreate the Qdrant collection.
-
-### Collections
+### 2. Register any markdown vault
 
 ```bash
-vq collection add /path/to/vault --name notes
-vq collection add /path/to/docs --name docs --pattern '**/*.md' --exclude 'archive/**'
-vq collection list
+vq collection add /path/to/your/vault --name notes
 ```
 
-Each collection is a root directory plus:
-
-- a name
-- a glob pattern
-- optional exclude globs
-
-### Contexts
+### 3. Add optional collection or path-prefix context
 
 ```bash
-vq context add vaultq://notes "Personal notes"
-vq context add vaultq://notes/projects "Project notes and runbooks"
-vq context add vaultq://notes/clients/acme "Client-specific notes for Acme"
+vq context add vaultq://notes "Personal knowledge vault"
+vq context add vaultq://notes/projects "Project notes, operating docs, and runbooks"
 ```
 
-Context is inherited by path prefix. The longest matching prefix wins in practice because all matching contexts are included in chunk contextualization ordered by specificity.
+### 4. Index the vault
 
-### Index
+Chunks only:
 
 ```bash
-vq index
-vq index --skip-knowledge
+vq index --collection notes --skip-knowledge
+```
+
+Chunks plus knowledge extraction:
+
+```bash
 vq index --collection notes
-vq index --collection notes --force
 ```
 
-Behavior:
-
-- reads changed files
-- updates stored documents
-- rebuilds chunks
-- optionally regenerates knowledge objects
-
-`--skip-knowledge` is important when:
-
-- you are bootstrapping a large vault
-- you want to test chunking first
-- you want to rechunk without paying the LLM cost again
-
-### Embed
+### 5. Embed pending rows
 
 ```bash
 vq embed
-vq embed --kinds chunks
-vq embed --kinds knowledge
-vq embed --limit 200
 ```
 
-This embeds any pending rows from Postgres into Qdrant.
-
-### Retrieval
+### 6. Query the vault
 
 ```bash
-vq search "release checklist"
-vq vsearch "how to ship the app"
-vq query "how do we handle onboarding emails?"
+vq query "how do we run the deployment checklist?"
 ```
 
-Modes:
+### 7. Keep the vault warm with background watch mode
 
-- `search`: BM25 only
-- `vsearch`: dense semantic only
-- `query`: hybrid + rerank, best quality
-
-### Fetch
+Bootstrap from the current filesystem state:
 
 ```bash
-vq get notes/path/to/doc.md
-vq get #42 --full
+vq watch --once --json
 ```
 
-This returns the stored document row, chunks, and knowledge objects.
+Then keep polling for changed markdown files and batch embeddings automatically:
 
-## Local Config
-
-`vq init` creates `.vaultq/config.json` in the current working directory.
-
-Example:
-
-```json
-{
-  "collections": [
-    {
-      "name": "notes",
-      "path": "/home/me/notes",
-      "pattern": "**/*.md",
-      "exclude_globs": ["archive/**"]
-    }
-  ],
-  "contexts": [
-    {
-      "target": "vaultq://notes",
-      "text": "Personal notes and working documents"
-    },
-    {
-      "target": "vaultq://notes/projects",
-      "text": "Project notes and operating procedures"
-    }
-  ]
-}
+```bash
+vq watch --no-initial-sync --interval 2
 ```
 
-## Data Model
+Useful watch flags:
 
-Postgres stores:
+- `--collection notes` to watch one configured collection
+- `--embed-limit 200` to cap one embed batch
+- `--max-embed-batches 4` to control how aggressively the queue drains per cycle
+- `--with-knowledge` to also run grounded knowledge extraction during watch indexing
+- `--max-loops N` for smoke tests and controlled runs
 
-- `vq_collections`
-- `vq_contexts`
-- `vq_documents`
-- `vq_chunks`
-- `vq_knowledge_objects`
+## Background Watch Mode
 
-Qdrant stores:
+Watch mode is the operational bridge between one-shot batch ingest and a continuously usable vault.
 
-- named dense vectors
-- named sparse BM25 vectors
-- named late-interaction multivectors
+- it polls configured collections instead of assuming one fixed machine-specific watcher backend
+- it detects create, update, and delete events from markdown snapshots
+- it reuses the same deletion-aware indexing path as `vq index`
+- it drains pending embeddings in bounded batches so one edit burst does not starve the rest of the runtime
+- it works for arbitrary vault roots because the watcher only relies on registered collection paths
 
-The table names are intentionally namespaced with `vq_` so this repo can share the same Postgres instance with other projects.
+Verified behavior on a disposable live vault:
 
-## Retrieval Pipeline
+- `vq watch --once --json` indexed `3` documents and embedded `3` chunk vectors
+- a later `vq watch --once --json` after one edit, one new note, and one deletion indexed `2`, deleted `1`, and embedded `2`
+- `vq watch --no-initial-sync --interval 1 --max-loops 5 --json` detected a live edit cycle and again indexed `2`, deleted `1`, and embedded `2`
 
-### Chunk Preparation
+### Watch Loop
 
-Each chunk is embedded with extra context, not just raw markdown text.
+```mermaid
+flowchart LR
+    FS["Markdown filesystem"] --> Snap["Snapshot diff"]
+    Snap -->|changes| Index["Deletion-aware index"]
+    Index --> Pending["Pending chunk / knowledge rows"]
+    Pending --> Drain["Bounded embed batches"]
+    Drain --> Q["Qdrant vectors"]
+    Q --> Search["Hybrid retrieval"]
+```
 
-The current contextualized chunk includes:
+## TUI
 
-- collection name
-- relative path
-- document title
-- heading path
-- section summary when available
-- document summary when available
-- inherited path context
-- previous and next chunk snippets
-- the actual passage text
+The TUI is the main operator surface.
 
-This is the practical replacement for naive chunk-first indexing.
+```bash
+vq
+```
 
-### Query Execution
+or explicitly:
 
-`vq query` currently does:
+```bash
+vq tui
+```
 
-1. BM25 candidate search
-2. dense vector candidate search
-3. RRF fusion
-4. ColBERT late-interaction rerank
-5. cross-encoder rerank
-6. neighboring chunk window expansion
+The current TUI exposes:
 
-That is the highest-quality path in the repo right now.
+- an overview of store and retrieval status
+- collection registration
+- pipeline controls for init, index, embed, watch start/stop, and doctor
+- search across hybrid, semantic, and keyword modes
+- MCP launch guidance
 
-## LLM Enrichment
+## MCP Surface
 
-If `OPENROUTER_API_KEY` is set, `vq index` extracts:
+VaultQ can expose the indexed vault as an MCP server for local tool use.
 
-- `segment_summary`
+STDIO transport:
+
+```bash
+vq mcp --transport stdio
+```
+
+HTTP transport:
+
+```bash
+vq mcp --transport http --host 127.0.0.1 --port 7070
+```
+
+Current tools:
+
+- `status`
+- `search`
+- `fetch`
+- `get_document`
+
+## Knowledge Extraction
+
+Knowledge extraction is optional on purpose.
+
+When `LLM_API_KEY` and the related `LLM_*` settings are configured, `vq index` can produce grounded knowledge objects such as:
+
 - `document_summary`
+- `segment_summary`
 - `concept`
 - `principle`
 - `method`
 - `sop`
 
-The prompts are designed to stay grounded in the source chunk text and prefer precision over volume.
+Those objects are stored in Postgres like any other indexed asset and can also be embedded into Qdrant for retrieval.
 
-### Rechunking Without Re-enrichment
-
-If you run:
+If you want the cheapest possible first pass, use:
 
 ```bash
 vq index --skip-knowledge
+vq embed --kinds chunks
 ```
 
-existing knowledge objects are remapped to new chunk IDs by line-range overlap.
+## Accuracy Notes
 
-That means you can iterate on chunking and contextualization without automatically paying the full LLM cost again.
+The retrieval path is tuned for answer quality rather than minimal moving parts:
 
-## Environment
+- chunks carry structural metadata such as title, heading path, line ranges, and inherited contexts
+- contextual chunk embeddings use raw ordered source groups when contextual embeddings are enabled
+- lexical retrieval stays enabled by default because exact terms still matter heavily in markdown corpora
+- reranking is enabled by default because fusion alone is not enough on ambiguous note queries
+- neighbor windows are added by default so the returned text contains the local paragraph neighborhood
 
-See [`.env.example`](.env.example) for all variables.
+If you disable contextual embeddings, VaultQ falls back to standard embedding requests over metadata-enriched text.
 
-The main groups are:
+For portability, the default lexical backend is Postgres full-text search. If you have a Qdrant deployment with sparse inference configured, set `SPARSE_BACKEND=qdrant` to move the lexical lane fully into Qdrant.
 
-- Postgres connection
-- Qdrant connection and collection name
-- embedding provider and model
-- OpenRouter enrichment config
-- chunking controls
-- late-interaction and reranker controls
+## Runtime Configuration
 
-Important defaults:
+The main environment contract is:
 
-- embedding model: `text-embedding-3-large`
-- late interaction model: `colbert-ir/colbertv2.0`
-- reranker: `Xenova/ms-marco-MiniLM-L-12-v2`
+| Area | Variables |
+| --- | --- |
+| Postgres | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASS`, or `DATABASE_URL` |
+| Qdrant | `QDRANT_URL`, `QDRANT_COLLECTION`, `QDRANT_PORT`, `QDRANT_GRPC_PORT` |
+| Embeddings | `VOYAGE_API_KEY`, `EMBED_PROVIDER`, `EMBED_BASE_URL`, `EMBED_MODEL`, `EMBED_API_KEY`, `EMBEDDING_DIM` |
+| Contextual batching | `ENABLE_CONTEXTUAL_EMBEDDINGS`, `CONTEXTUAL_WINDOW_TOKENS`, `CONTEXTUAL_WINDOW_MAX_CHUNKS`, `CONTEXTUAL_REQUEST_MAX_GROUPS`, `CONTEXTUAL_REQUEST_MAX_DOCUMENTS`, `CONTEXTUAL_REQUEST_MAX_TOKENS` |
+| Sparse retrieval | `ENABLE_SPARSE_RETRIEVAL`, `SPARSE_BACKEND`, `SPARSE_VECTOR_NAME`, `QDRANT_SPARSE_MODEL` |
+| Reranking | `ENABLE_RERANKER`, `RERANK_BASE_URL`, `RERANKER_MODEL`, `RERANK_API_KEY`, `RERANK_CANDIDATES`, `NEIGHBOR_WINDOW_SIZE` |
+| Optional LLM extraction | `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_TIMEOUT`, `LLM_RETRIES`, `LLM_TPM_LIMIT` |
+| Runtime location | `VQ_CONFIG_DIR`, `VQ_ENV_FILE` |
 
-## Current Limitations
+See [.env.example](./.env.example) for the current full set of defaults.
 
-- This is not true token-level late chunking over whole documents.
-- It is the practical version: structure-aware chunking plus contextualized passages before indexing.
-- The CLI is the primary interface right now. There is no MCP server in this repo yet.
-- The enrichment prompts are optimized for procedural and knowledge-heavy notes, not arbitrary creative writing.
+## Common Command Patterns
 
-## Validation Status
+```bash
+vq doctor --live
+vq init
+vq collection add /path/to/vault --name notes
+vq context add vaultq://notes/clients/acme "Acme client work"
+vq index --collection notes --skip-knowledge
+vq embed --kinds chunks --limit 200
+vq query "release checklist"
+vq fetch <point-id>
+vq get notes/project/release.md --full
+vq mcp --transport stdio
+```
 
-The repo has been smoke-tested locally for:
+## Verification
 
-- package install
-- CLI help
-- schema initialization
-- collection registration
-- context registration
-- indexing markdown files
-- embedding pending chunks
-- hybrid retrieval
-- document fetch
+Fast checks:
 
-## Roadmap
+```bash
+python -m compileall src
+python -m vaultq.cli --help
+python -m vaultq.cli doctor --live
+python -m vaultq.cli mcp --help
+```
 
-- MCP server surface for agent-native usage
-- better markdown table and callout handling
-- richer knowledge-object dedupe across documents
-- partial incremental embed scheduling
-- export/import utilities for moving stores between machines
+Local stack:
+
+```bash
+docker compose up -d
+python -m vaultq.cli init
+python -m vaultq.cli status --json
+```
+
+End-to-end bootstrap on a real vault:
+
+```bash
+python -m vaultq.cli collection add /path/to/vault --name notes
+python -m vaultq.cli index --collection notes --skip-knowledge --json
+python -m vaultq.cli embed --kinds chunks --json
+python -m vaultq.cli query "your test query" --json
+```
+
+## Project Structure
+
+```text
+src/vaultq/
+  cli.py              CLI entrypoint
+  tui.py              Textual operator UI
+  mcp_server.py       FastMCP server
+  indexer.py          Markdown ingest and update logic
+  chunker.py          Heading-aware/token-aware chunking
+  embed.py            Pending-row embedding and Qdrant upserts
+  search.py           Hybrid retrieval, rerank, neighbor windows
+  store.py            Postgres schema, config, and Qdrant bootstrap
+  enrich.py           Optional grounded knowledge extraction
+  retrieval_models.py Provider-aware embedding and rerank HTTP helpers
+```
+
+## Current Status
+
+VaultQ has been rebuilt around:
+
+- portable runtime config
+- Textual TUI as the default UX
+- FastMCP server support
+- contextual Voyage-style embeddings with tested Atlas defaults
+- dense retrieval plus a portable lexical lane
+- reranking and neighbor windows
+- adaptive Qdrant upsert batching
+- live provider diagnostics with endpoint mismatch detection
+- idempotent local bootstrap for Postgres + Qdrant
+
+The repo is now set up as a standalone markdown-vault ingestion and retrieval tool rather than a thin local script.

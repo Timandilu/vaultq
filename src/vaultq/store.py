@@ -10,8 +10,24 @@ import httpx
 import psycopg
 from psycopg.rows import dict_row
 
-from vaultq.embedding_provider import EmbeddingProviderConfig, load_env_file, resolve_embedding_provider
-from vaultq.retrieval_models import late_interaction_dim, late_vector_name, use_multivector
+from vaultq.embedding_provider import load_env_layers
+from vaultq.retrieval_models import (
+    dense_vector_name,
+    embedding_provider_name,
+    hybrid_dense_dim,
+    hybrid_encoder_model_name,
+    reranker_model_name,
+    sparse_backend,
+    sparse_vector_name,
+    use_contextualized_chunk_embeddings,
+    use_qdrant_sparse_vectors,
+    use_sparse,
+    validate_embedding_configuration,
+)
+from vaultq.embedding_provider import resolve_embedding_provider, resolve_rerank_provider
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_env_layers(_PROJECT_ROOT)
 
 CONFIG_DIR_NAME = ".vaultq"
 CONFIG_FILE_NAME = "config.json"
@@ -80,7 +96,7 @@ CREATE TABLE IF NOT EXISTS vq_knowledge_objects (
     body_text         TEXT NOT NULL,
     json_payload      JSONB NOT NULL DEFAULT '{}'::jsonb,
     confidence        DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-    source_chunk_ids  JSONB,
+    source_chunk_ids  JSONB NOT NULL DEFAULT '[]'::jsonb,
     source_line_start INTEGER,
     source_line_end   INTEGER,
     content_hash      TEXT NOT NULL,
@@ -91,8 +107,10 @@ CREATE TABLE IF NOT EXISTS vq_knowledge_objects (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vq_documents_rel_path ON vq_documents(collection_id, rel_path);
 CREATE INDEX IF NOT EXISTS idx_vq_chunks_document ON vq_chunks(document_id, chunk_index);
+CREATE INDEX IF NOT EXISTS idx_vq_chunks_pending ON vq_chunks(version, qdrant_point_id);
 CREATE INDEX IF NOT EXISTS idx_vq_chunks_qdrant ON vq_chunks(qdrant_point_id);
 CREATE INDEX IF NOT EXISTS idx_vq_knowledge_document ON vq_knowledge_objects(document_id, object_type);
+CREATE INDEX IF NOT EXISTS idx_vq_knowledge_pending ON vq_knowledge_objects(version, qdrant_point_id);
 CREATE INDEX IF NOT EXISTS idx_vq_knowledge_qdrant ON vq_knowledge_objects(qdrant_point_id);
 """
 
@@ -103,16 +121,12 @@ class Settings:
     qdrant_url: str
     qdrant_collection: str
     embedding_dim: int
-    provider: EmbeddingProviderConfig
-
-
-def load_runtime_env(project_root: Path) -> None:
-    env_path = project_root / ".env"
-    if env_path.exists():
-        load_env_file(env_path, override=False)
 
 
 def config_dir(base_dir: Optional[Path] = None) -> Path:
+    explicit = (os.getenv("VQ_CONFIG_DIR") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
     root = Path(base_dir or Path.cwd())
     return root / CONFIG_DIR_NAME
 
@@ -161,12 +175,12 @@ def target_to_parts(target: str) -> Tuple[str, str]:
 
 
 def get_settings() -> Settings:
-    provider = resolve_embedding_provider()
+    validate_embedding_configuration()
     dsn = (os.getenv("DATABASE_URL") or os.getenv("DB_DSN") or "").strip()
     if not dsn:
         dsn = (
             f"host={os.getenv('DB_HOST', '127.0.0.1')} "
-            f"dbname={os.getenv('DB_NAME', 'postgres')} "
+            f"dbname={os.getenv('DB_NAME', 'vaultq')} "
             f"user={os.getenv('DB_USER', 'postgres')} "
             f"password={os.getenv('DB_PASS', 'password')} "
             f"port={os.getenv('DB_PORT', '5432')}"
@@ -175,8 +189,7 @@ def get_settings() -> Settings:
         db_dsn=dsn,
         qdrant_url=os.getenv("QDRANT_URL", "http://127.0.0.1:6333").rstrip("/"),
         qdrant_collection=os.getenv("QDRANT_COLLECTION", "vaultq"),
-        embedding_dim=int(os.getenv("EMBEDDING_DIM", "3072")),
-        provider=provider,
+        embedding_dim=hybrid_dense_dim(),
     )
 
 
@@ -195,54 +208,87 @@ def ensure_schema(settings: Optional[Settings] = None) -> None:
 
 def ensure_qdrant_collection(settings: Optional[Settings] = None, reset: bool = False) -> None:
     settings = settings or get_settings()
+    dense_name = dense_vector_name()
+    sparse_name = sparse_vector_name()
     with httpx.Client(timeout=60.0) as client:
-        for _ in range(30):
-            try:
-                resp = client.get(f"{settings.qdrant_url}/collections")
-                if resp.status_code == 200:
-                    break
-            except Exception:
-                pass
         if reset:
             delete_resp = client.delete(f"{settings.qdrant_url}/collections/{settings.qdrant_collection}")
             if delete_resp.status_code not in (200, 202, 404):
-                raise RuntimeError(f"Failed to delete Qdrant collection: {delete_resp.status_code} {delete_resp.text}")
+                raise RuntimeError(
+                    f"Failed to delete Qdrant collection: {delete_resp.status_code} {delete_resp.text}"
+                )
         vectors: Dict[str, Any] = {
-            "dense": {
+            dense_name: {
                 "size": settings.embedding_dim,
                 "distance": "Cosine",
             }
         }
-        if use_multivector():
-            late_dim = late_interaction_dim()
-            if late_dim <= 0:
-                raise RuntimeError("Could not resolve late interaction dimension")
-            vectors[late_vector_name()] = {
-                "size": late_dim,
-                "distance": "Cosine",
-                "multivector_config": {"comparator": "max_sim"},
-                "hnsw_config": {"m": 0},
+        payload: Dict[str, Any] = {"vectors": vectors}
+        if use_qdrant_sparse_vectors():
+            payload["sparse_vectors"] = {
+                sparse_name: {"modifier": "idf"},
             }
         create_resp = client.put(
             f"{settings.qdrant_url}/collections/{settings.qdrant_collection}",
-            json={
-                "vectors": vectors,
-                "sparse_vectors": {
-                    "bm25": {"modifier": "idf"},
-                },
-            },
+            json=payload,
         )
+        if create_resp.status_code in (200, 201):
+            return
+        if create_resp.status_code == 409:
+            existing_resp = client.get(f"{settings.qdrant_url}/collections/{settings.qdrant_collection}")
+            existing_resp.raise_for_status()
+            params = existing_resp.json().get("result", {}).get("config", {}).get("params", {})
+            vectors = params.get("vectors") or {}
+            sparse_vectors = params.get("sparse_vectors") or {}
+            dense_config = vectors.get(dense_name) or {}
+            dense_size = int(dense_config.get("size", 0) or 0)
+            if dense_size != settings.embedding_dim:
+                raise RuntimeError(
+                    "Existing Qdrant collection has the wrong dense vector size; run `vq init --reset` "
+                    f"to recreate it with size {settings.embedding_dim}."
+                )
+            if use_qdrant_sparse_vectors() and sparse_name not in sparse_vectors:
+                raise RuntimeError(
+                    "Existing Qdrant collection is missing the configured sparse vector; "
+                    "run `vq init --reset` to recreate it."
+                )
+            return
         if create_resp.status_code not in (200, 201):
-            raise RuntimeError(f"Failed to create Qdrant collection: {create_resp.status_code} {create_resp.text}")
+            raise RuntimeError(
+                f"Failed to create Qdrant collection: {create_resp.status_code} {create_resp.text}"
+            )
+
+
+def delete_qdrant_points(point_ids: Sequence[str], settings: Optional[Settings] = None) -> int:
+    ids = [str(point_id) for point_id in point_ids if str(point_id or "").strip()]
+    if not ids:
+        return 0
+    settings = settings or get_settings()
+    with httpx.Client(timeout=60.0) as client:
+        resp = client.post(
+            f"{settings.qdrant_url}/collections/{settings.qdrant_collection}/points/delete?wait=true",
+            json={"points": ids},
+        )
+        if resp.status_code not in (200, 202):
+            raise RuntimeError(f"Failed to delete Qdrant points: {resp.status_code} {resp.text}")
+    return len(ids)
 
 
 def upsert_collection_rows(base_dir: Optional[Path] = None, settings: Optional[Settings] = None) -> Dict[str, int]:
     config = read_config(base_dir)
     settings = settings or get_settings()
+    configured = {
+        row["name"]: {
+            "path": str(Path(row["path"]).expanduser().resolve()),
+            "pattern": row.get("pattern", "**/*.md"),
+            "exclude_globs": row.get("exclude_globs", []),
+        }
+        for row in config.get("collections", [])
+    }
     ids: Dict[str, int] = {}
     with connect(settings) as conn:
         with conn.cursor() as cur:
-            for row in config.get("collections", []):
+            for name, row in configured.items():
                 cur.execute(
                     """
                     INSERT INTO vq_collections (name, root_path, pattern, exclude_globs, updated_at)
@@ -254,14 +300,10 @@ def upsert_collection_rows(base_dir: Optional[Path] = None, settings: Optional[S
                                   updated_at = NOW()
                     RETURNING id
                     """,
-                    (
-                        row["name"],
-                        str(Path(row["path"]).expanduser().resolve()),
-                        row.get("pattern", "**/*.md"),
-                        json.dumps(row.get("exclude_globs", [])),
-                    ),
+                    (name, row["path"], row["pattern"], json.dumps(row["exclude_globs"])),
                 )
-                ids[row["name"]] = int(cur.fetchone()["id"])
+                ids[name] = int(cur.fetchone()["id"])
+
             cur.execute("DELETE FROM vq_contexts")
             for context in config.get("contexts", []):
                 collection_name, path_prefix = target_to_parts(context["target"])
@@ -290,6 +332,8 @@ def collection_rows(settings: Optional[Settings] = None) -> List[Dict[str, Any]]
 
 def status_snapshot(settings: Optional[Settings] = None) -> Dict[str, Any]:
     settings = settings or get_settings()
+    embed_provider = resolve_embedding_provider()
+    rerank_provider = resolve_rerank_provider()
     with connect(settings) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) AS count FROM vq_collections")
@@ -313,4 +357,13 @@ def status_snapshot(settings: Optional[Settings] = None) -> Dict[str, Any]:
         "pending_knowledge_embeddings": pending_knowledge_embeddings,
         "qdrant_collection": settings.qdrant_collection,
         "qdrant_url": settings.qdrant_url,
+        "embedding_provider": embedding_provider_name(),
+        "embedding_model": hybrid_encoder_model_name(),
+        "embedding_base_url": embed_provider.base_url,
+        "embedding_dim": settings.embedding_dim,
+        "reranker_model": reranker_model_name(),
+        "rerank_base_url": rerank_provider.base_url,
+        "contextual_embeddings": use_contextualized_chunk_embeddings(),
+        "sparse_backend": sparse_backend() if use_sparse() else None,
+        "sparse_vector_name": sparse_vector_name() if use_qdrant_sparse_vectors() else None,
     }

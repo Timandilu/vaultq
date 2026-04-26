@@ -436,10 +436,11 @@ class VaultQTui(App[None]):
                     "",
                     "Tool surface:",
                     "",
-                    "- `status`",
-                    "- `search`",
-                    "- `fetch`",
-                    "- `get_document`",
+                    "- `vaultq_status`",
+                    "- `vaultq_collection_list`",
+                    "- `vaultq_search`",
+                    "- `vaultq_query`",
+                    "- `vaultq_get_doc`",
                 ]
             )
         )

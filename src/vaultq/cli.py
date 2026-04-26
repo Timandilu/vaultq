@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -181,6 +182,13 @@ def _cmd_mcp(args) -> int:
     return 0
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="VaultQ: TUI, CLI, and MCP toolkit for markdown-vault ingestion and hybrid retrieval"
@@ -298,9 +306,9 @@ def build_parser() -> argparse.ArgumentParser:
     tui_parser.set_defaults(func=_cmd_tui)
 
     mcp_parser = sub.add_parser("mcp", help="Run the VaultQ MCP server")
-    mcp_parser.add_argument("--transport", choices=("stdio", "http"), default="stdio")
-    mcp_parser.add_argument("--host", default="127.0.0.1")
-    mcp_parser.add_argument("--port", type=int, default=7070)
+    mcp_parser.add_argument("--transport", choices=("stdio", "http"), default=os.getenv("MCP_TRANSPORT", "stdio"))
+    mcp_parser.add_argument("--host", default=os.getenv("MCP_HOST", "127.0.0.1"))
+    mcp_parser.add_argument("--port", type=int, default=_env_int("MCP_PORT", 7070))
     mcp_parser.add_argument("--no-banner", action="store_true")
     mcp_parser.set_defaults(func=_cmd_mcp)
 

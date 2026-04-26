@@ -264,28 +264,120 @@ The current TUI exposes:
 - search across hybrid, semantic, and keyword modes
 - MCP launch guidance
 
-## MCP Surface
+## Using VaultQ As MCP
 
-VaultQ can expose the indexed vault as an MCP server for local tool use.
+VaultQ can run as a local, read-only MCP server for Codex, Claude Desktop, local agent loops, and demos.
 
-STDIO transport:
+Start it with STDIO transport:
 
 ```bash
-vq mcp --transport stdio
+vq mcp --transport stdio --no-banner
 ```
 
-HTTP transport:
+HTTP transport is also available for clients that support it:
 
 ```bash
 vq mcp --transport http --host 127.0.0.1 --port 7070
 ```
 
-Current tools:
+The MCP surface intentionally exposes read-only tools only:
 
-- `status`
-- `search`
-- `fetch`
-- `get_document`
+- `vaultq_status`: returns store and retrieval status
+- `vaultq_collection_list`: returns locally configured collections and contexts
+- `vaultq_search`: runs keyword-only retrieval
+- `vaultq_query`: runs the full hybrid retrieval path
+- `vaultq_get_doc`: fetches a source document or cited chunk by `rel_path`, `#document_id`, point id, `chunk:<id>`, or `knowledge:<id>`
+
+Each tool returns:
+
+```json
+{
+  "ok": true,
+  "data": {}
+}
+```
+
+Errors are returned as structured payloads instead of write-capable side effects:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "type": "RuntimeError",
+    "message": "No API key configured for Embedding request",
+    "hint": "Check that Postgres, Qdrant, and the embedding/rerank provider settings are available."
+  }
+}
+```
+
+### Codex MCP Config
+
+Example `~/.codex/config.toml` entry:
+
+```toml
+[mcp_servers.vaultq]
+command = "/path/to/vaultq/.venv/bin/vq"
+args = ["mcp", "--transport", "stdio", "--no-banner"]
+
+[mcp_servers.vaultq.env]
+VQ_CONFIG_DIR = "/path/to/vaultq-runtime/config"
+VQ_ENV_FILE = "/path/to/vaultq-runtime/.env"
+```
+
+### Claude Desktop MCP Config
+
+Example `claude_desktop_config.json` entry:
+
+```json
+{
+  "mcpServers": {
+    "vaultq": {
+      "command": "/path/to/vaultq/.venv/bin/vq",
+      "args": ["mcp", "--transport", "stdio", "--no-banner"],
+      "env": {
+        "VQ_CONFIG_DIR": "/path/to/vaultq-runtime/config",
+        "VQ_ENV_FILE": "/path/to/vaultq-runtime/.env"
+      }
+    }
+  }
+}
+```
+
+Use absolute paths in client configs. `VQ_CONFIG_DIR` should point at the directory containing `config.json`, and `VQ_ENV_FILE` should point at the env file with Postgres, Qdrant, and provider settings.
+
+### MCP Smoke Transcript
+
+This transcript was produced against a disposable three-note corpus with a local fake embedding provider, local Postgres, and local Qdrant.
+
+```text
+$ vq query "what should happen after smoke tests?" --json
+top result: ops/release.md
+text: After smoke tests pass, ship the release and watch metrics for fifteen minutes.
+
+$ MCP tools/list
+vaultq_status
+vaultq_collection_list
+vaultq_search
+vaultq_query
+vaultq_get_doc
+
+$ MCP vaultq_query {"query":"what should happen after smoke tests?","limit":3}
+ok: true
+top result: ops/release.md
+
+$ MCP vaultq_get_doc {"identifier":"ops/release.md","full":false}
+ok: true
+title: Release Checklist
+chunks: 1
+```
+
+### MCP Troubleshooting
+
+- `No API key configured`: set `VOYAGE_API_KEY`, `EMBED_API_KEY`, or the provider-specific key in `VQ_ENV_FILE`.
+- `connection refused` from Postgres or Qdrant: run `docker compose up -d` or point `DB_*` / `QDRANT_URL` at the right services.
+- `collections` is empty: run `vq collection add /path/to/vault --name notes` with the same `VQ_CONFIG_DIR` used by the MCP client.
+- `Qdrant dense vector size mismatch`: check `EMBEDDING_DIM`, then recreate the test collection with `vq init --reset` if needed.
+- Claude or Codex cannot start the server: use absolute paths for `command`, `VQ_CONFIG_DIR`, and `VQ_ENV_FILE`, then test the same command directly in a shell.
 
 ## Knowledge Extraction
 

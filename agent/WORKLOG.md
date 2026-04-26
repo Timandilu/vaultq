@@ -66,6 +66,9 @@ Rebuild `vaultq` into a portable standalone markdown-vault ingestion and retriev
 - Added `vq watch` for background polling, change detection, deletion-aware reindexing, and bounded embed draining
 - Added TUI controls for starting and stopping watch mode and surfaced watch state in the overview
 - Reduced watch cold-start latency by removing heavy imports from the help and baseline-snapshot path
+- Reworked the MCP server into an agent-native read-only surface with `vaultq_status`, `vaultq_collection_list`, `vaultq_search`, `vaultq_query`, and `vaultq_get_doc`
+- Added structured MCP success/error payloads and redaction of secret-shaped values in tool errors
+- Documented Codex and Claude MCP configs, startup commands, a smoke transcript, and troubleshooting in the README
 
 ### What I ran
 
@@ -101,6 +104,12 @@ Rebuild `vaultq` into a portable standalone markdown-vault ingestion and retriev
   - `vq watch --once --json`
   - `vq watch --no-initial-sync --interval 1 --max-loops 5 --json`
   - `vq query "owner follow-up actions after rollback" --json`
+- MCP validation:
+  - `python -m compileall src`
+  - `vq mcp --help`
+  - in-process FastMCP client `tools/list`
+  - in-process FastMCP client `vaultq_collection_list`
+  - local STDIO MCP client smoke against a disposable corpus
 
 ### Verification result
 
@@ -128,6 +137,11 @@ Rebuild `vaultq` into a portable standalone markdown-vault ingestion and retriev
   - a later sync after one edit, one new note, and one deletion indexed `2`, deleted `1`, and embedded `2`
   - a real `--no-initial-sync` background cycle detected live filesystem changes and again indexed `2`, deleted `1`, and embedded `2`
   - retrieval after the live watch update returned `ops/postmortem.md` for `owner follow-up actions after rollback`
+- MCP server validation succeeded:
+  - tool listing exposes only read-only VaultQ tools
+  - `vaultq_collection_list` works without touching Postgres or Qdrant
+  - `vaultq_query` returns the same plausible top result as CLI `vq query`
+  - `vaultq_get_doc` fetches the source document referenced by the top MCP result
 
 ### Remaining gaps
 

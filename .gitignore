@@ -1,4 +1,6 @@
 .venv/
+.env
+.env.local
 .vaultq/
 tmp_vault/
 __pycache__/

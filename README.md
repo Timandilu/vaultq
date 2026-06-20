@@ -25,6 +25,7 @@ VaultQ is aimed at a higher bar:
 - dense retrieval in the same collection
 - reciprocal-rank fusion
 - reranking
+- graph-aware adjacency and session-diversity scoring signals
 - neighboring chunk windows on final results
 - optional grounded LLM extraction into reusable knowledge objects
 - TUI for operators, CLI for scripts, MCP for agents
@@ -92,7 +93,8 @@ flowchart LR
     DS --> F["RRF fusion"]
     SS --> F
     F --> R["Rerank top candidates"]
-    R --> N["Neighbor-window expansion"]
+    R --> G["Graph signals<br/>adjacency boost + session diversification"]
+    G --> N["Neighbor-window expansion"]
     N --> O["Result contract"]
     O --> TUI["TUI"]
     O --> CLI["CLI"]
@@ -107,13 +109,21 @@ flowchart LR
 - `vq context add` attaches inherited context to a whole collection or path prefix
 - `vq index` scans changed markdown files, rewrites chunks, and optionally writes knowledge objects
 - `vq embed` embeds any pending chunks and knowledge objects
-- `vq watch` keeps polling the vault, auto-indexes changed markdown, and drains embedding batches in the background
-- `vq query` runs hybrid retrieval with reranking
+- `vq watch` keeps the vault warm with low-impact defaults: idle wakeups do no filesystem scan, new markdown discovery runs as a path-only scan every 10 minutes, and changed/deleted-file chunk refresh runs at most daily unless you override the scheduler flags
+- `vq query` runs hybrid retrieval with reranking; `--mode focused` returns concise, source-diverse related-work results without neighbor-window expansion
+- `vq related` surfaces source-diverse existing notes that may connect to an idea before an agent creates a new node
+- `vq clusters semantic` clusters any seed node set by shared semantic anchors in the indexed corpus; `--session-policy penalize` uses adaptive session-log reranking plus a per-seed cap instead of treating transcripts as a normal pool
 - `vq search` runs keyword retrieval only
 - `vq vsearch` runs dense retrieval only
 - `vq fetch` returns a single indexed point with expanded neighboring context
 - `vq get` returns the stored source document, its chunks, and its knowledge objects
+- `vq chunks stats` reports chunk token/character distribution, embedding coverage, and long-chunk outliers
+- `vq background status` shows the DB-backed state of the MCP-tied background indexing worker
+- `vq agent prepare` prepares the agent workspace runtime without starting a background worker
+- `vq agent maintain` runs one autonomous, reversible self-maintenance pass with workspace promotion, safety receipts, idea clustering, and a human-facing update note
 - `vq mcp` runs the retrieval surface as an MCP server
+
+Graph signals are intentionally lightweight and fail open. If the local graph index is empty or stale, retrieval still returns the fused/reranked results. When graph data exists, notes linked by at least two other top candidates get a small adjacency boost, and duplicate session-like/run-like results are gently demoted so an agent sees more diverse evidence.
 
 ## Standalone And Portable By Design
 
@@ -123,6 +133,7 @@ VaultQ is not wired to one workstation:
 - config defaults to a local `.vaultq/config.json` in the working directory
 - `VQ_CONFIG_DIR` can move config anywhere
 - `VQ_ENV_FILE` can point to any runtime env file
+- `VQ_EMBED_ENV_FILE` can point at another MCP embedding env; VaultQ imports only provider/rerank keys from it, not its database settings
 - database and Qdrant addresses come from environment variables
 - provider settings are generic OpenAI-compatible HTTP settings rather than project-specific glue
 
@@ -192,52 +203,63 @@ vq embed
 vq query "how do we run the deployment checklist?"
 ```
 
-### 7. Keep the vault warm with background watch mode
+### 7. Keep the vault warm with low-impact watch mode
 
-Bootstrap from the current filesystem state:
-
-```bash
-vq watch --once --json
-```
-
-Then keep polling for changed markdown files and batch embeddings automatically:
+For background use, start from the current path-only filesystem baseline so
+startup does not trigger a full index:
 
 ```bash
-vq watch --no-initial-sync --interval 2
+vq watch --no-initial-sync
 ```
+
+## Agent-Native Operation Docs
+
+VaultQ now has dedicated operational docs for agent usage:
+
+- [Agent-native operations](docs/agent-native-operations.md)
+- [Retrieval and embedding](docs/retrieval-and-embedding.md)
+- [MCP and client integration](docs/mcp-and-client-integration.md)
+- [VaultQ agent workspace usage guide](docs/vaultq-agent-workspace-how-to-use.md)
+
+For the Second Brain runtime, the intended agent namespace is `14_Agent_Workspace`, and default retrieval excludes `88_Agents/sessions/**` so stale imported session transcripts do not dominate normal agent queries.
 
 Useful watch flags:
 
 - `--collection notes` to watch one configured collection
-- `--embed-limit 200` to cap one embed batch
-- `--max-embed-batches 4` to control how aggressively the queue drains per cycle
+- `--interval 300` to control the cheap scheduler wakeup; this does not scan the vault unless a slower cadence is due
+- `--new-file-index-delay-seconds 600` to run path-only new-file discovery and batch newly created markdown files
+- `--changed-index-interval-seconds 86400` to refresh edited/deleted-file chunks at most daily
+- `--embed-limit 100` to cap one embed batch
+- `--max-embed-batches 1` to control how aggressively the queue drains per cycle
 - `--with-knowledge` to also run grounded knowledge extraction during watch indexing
 - `--max-loops N` for smoke tests and controlled runs
 
 ## Background Watch Mode
 
-Watch mode is the operational bridge between one-shot batch ingest and a continuously usable vault.
+Watch mode is the operational bridge between one-shot batch ingest and a continuously usable vault without taking over the machine.
 
-- it polls configured collections instead of assuming one fixed machine-specific watcher backend
-- it detects create, update, and delete events from markdown snapshots
-- it reuses the same deletion-aware indexing path as `vq index`
-- it drains pending embeddings in bounded batches so one edit burst does not starve the rest of the runtime
+- it wakes a cheap scheduler loop instead of scanning the vault on every tick
+- it uses a path-only filesystem scan on the new-file cadence instead of statting every markdown file every poll
+- it indexes newly discovered files together and then embeds the resulting chunks in bounded batches
+- it refreshes changed/deleted-file chunks through the deletion-aware `vq index` path at most daily
+- it drains pending embeddings in bounded batches and schedules later follow-up batches when vectors remain
 - it works for arbitrary vault roots because the watcher only relies on registered collection paths
-
-Verified behavior on a disposable live vault:
-
-- `vq watch --once --json` indexed `3` documents and embedded `3` chunk vectors
-- a later `vq watch --once --json` after one edit, one new note, and one deletion indexed `2`, deleted `1`, and embedded `2`
-- `vq watch --no-initial-sync --interval 1 --max-loops 5 --json` detected a live edit cycle and again indexed `2`, deleted `1`, and embedded `2`
 
 ### Watch Loop
 
 ```mermaid
 flowchart LR
-    FS["Markdown filesystem"] --> Snap["Snapshot diff"]
-    Snap -->|changes| Index["Deletion-aware index"]
-    Index --> Pending["Pending chunk / knowledge rows"]
+    Tick["Cheap idle wakeup"] --> DueNew{"10-minute new-file cadence due?"}
+    Tick --> DueDaily{"Daily refresh due?"}
+    FS["Markdown filesystem"] --> PathScan["Path-only scan"]
+    DueNew -->|yes| PathScan
+    PathScan -->|new files| PathIndex["Batched path index"]
+    DueDaily -->|yes| Index["Deletion-aware collection index"]
+    PathIndex --> Pending["Pending chunk / knowledge rows"]
+    Index --> Pending
     Pending --> Drain["Bounded embed batches"]
+    Drain -->|pending remains| Later["Later follow-up batch"]
+    Later --> Drain
     Drain --> Q["Qdrant vectors"]
     Q --> Search["Hybrid retrieval"]
 ```
@@ -258,15 +280,16 @@ vq tui
 
 The current TUI exposes:
 
-- an overview of store and retrieval status
+- an overview of store, retrieval, and chunk length health
 - collection registration
 - pipeline controls for init, index, embed, watch start/stop, and doctor
+- agent runtime controls for autonomous workspace maintenance, idea clustering, and the human-facing update note
 - search across hybrid, semantic, and keyword modes
 - MCP launch guidance
 
 ## Using VaultQ As MCP
 
-VaultQ can run as a local, read-only MCP server for Codex, Claude Desktop, local agent loops, and demos.
+VaultQ can run as a local MCP server for Codex, Antigravity, Claude Desktop, local agent loops, and demos.
 
 Start it with STDIO transport:
 
@@ -277,16 +300,42 @@ vq mcp --transport stdio --no-banner
 HTTP transport is also available for clients that support it:
 
 ```bash
-vq mcp --transport http --host 127.0.0.1 --port 7070
+vq mcp --transport http --host 127.0.0.1 --port 7073
 ```
 
-The MCP surface intentionally exposes read-only tools only:
+The MCP surface exposes retrieval tools plus policy-gated agent-write tools. Writes are constrained by the configured vault policy and property schema; by default, agent writes belong under `14_Agent_Workspace`. Agents should call `vaultq_write_status` before creating notes when they are unsure about allowed `type`, `domain`, tags, or optional properties.
 
 - `vaultq_status`: returns store and retrieval status
 - `vaultq_collection_list`: returns locally configured collections and contexts
+- `vaultq_operation_list`: lists declared operations and parameter contracts
+- `vaultq_chunk_stats`: returns chunk length distribution, embedding coverage, and longest chunk samples
+- `vaultq_background_status`: returns DB-backed state for the MCP-tied background index worker
 - `vaultq_search`: runs keyword-only retrieval
-- `vaultq_query`: runs the full hybrid retrieval path
+- `vaultq_query`: runs the hybrid retrieval path; `mode` can be `fast`, `focused`, `balanced`, `deep`, or `hybrid`
+- `vaultq_related_work`: surfaces source-diverse existing notes that may connect to an idea before writing a new note
+- `vaultq_semantic_clusters`: clusters arbitrary seed notes by shared semantic anchors across indexed notes, imported texts, and explicitly requested session logs; penalized session logs are adaptively reranked and capped per seed
 - `vaultq_get_doc`: fetches a source document or cited chunk by `rel_path`, `#document_id`, point id, `chunk:<id>`, or `knowledge:<id>`
+- `vaultq_write_status`: shows write policy, property schema, and AI workspace status
+- `vaultq_capture`: creates an agent-authored note in the AI workspace
+- `vaultq_note_propose`: writes a proposal note under the AI workspace, without canonical vault promotion
+- `vaultq_note_put`: creates or replaces an allowed note path
+- `vaultq_note_append`: appends text to an allowed note path
+- `vaultq_property_propose`: proposes a new property or tag rule without approving it
+- `vaultq_graph_extract`: extracts wikilinks, markdown links, and frontmatter graph edges into the local index
+- `vaultq_graph_neighbors`: lists outgoing links for a note
+- `vaultq_graph_backlinks`: lists backlinks for a note or identifier
+- `vaultq_graph_traverse`: follows graph edges by direction, depth, and optional edge type
+- `vaultq_agent_prepare`: prepares a disabled, reversible review/promote runtime and optional diff sheet; it does not start a background worker
+- `vaultq_agent_maintain`: runs one autonomous, reversible self-maintenance pass inside `14_Agent_Workspace`, writes ledgers, safety receipts, idea clusters, and the human-facing workspace update note
+- `vaultq_think`: creates a lightweight cited synthesis from retrieval results
+- `vaultq_maintain`: inspects the AI workspace and can write a maintenance report
+
+When `VQ_BACKGROUND_INDEX_COLLECTION` is set for the MCP process, VaultQ also starts a low-impact background upkeep worker. The worker starts from a path-only filesystem baseline, avoids a full startup index, wakes cheaply every 5 minutes by default, discovers new markdown files with a path-only scan every 10 minutes, refreshes changed/deleted-file chunks on the configured daily interval using stored file size/mtime metadata, and uses small embed batches so retrieval freshness does not take over the machine. The worker writes status into Postgres, visible through `vaultq_background_status` or `vq background status --json`.
+
+When `VQ_SELF_MAINTAIN_INTERVAL_SECONDS` is set above zero, the MCP process also
+starts the official state-gated self-maintenance loop. The Windows
+`start_vaultq_mcp.bat` enables it for the `second_brain` collection; portable
+installs keep it disabled by default.
 
 Each tool returns:
 
@@ -297,7 +346,7 @@ Each tool returns:
 }
 ```
 
-Errors are returned as structured payloads instead of write-capable side effects:
+Errors are returned as structured payloads:
 
 ```json
 {
@@ -357,9 +406,13 @@ text: After smoke tests pass, ship the release and watch metrics for fifteen min
 $ MCP tools/list
 vaultq_status
 vaultq_collection_list
+vaultq_operation_list
 vaultq_search
 vaultq_query
 vaultq_get_doc
+vaultq_write_status
+vaultq_capture
+vaultq_property_propose
 
 $ MCP vaultq_query {"query":"what should happen after smoke tests?","limit":3}
 ok: true
@@ -407,6 +460,7 @@ The retrieval path is tuned for answer quality rather than minimal moving parts:
 
 - chunks carry structural metadata such as title, heading path, line ranges, and inherited contexts
 - contextual chunk embeddings use raw ordered source groups when contextual embeddings are enabled
+- contextual groups are bounded by outbound text estimates so very long notes do not block corpus embedding
 - lexical retrieval stays enabled by default because exact terms still matter heavily in markdown corpora
 - reranking is enabled by default because fusion alone is not enough on ambiguous note queries
 - neighbor windows are added by default so the returned text contains the local paragraph neighborhood
@@ -424,11 +478,13 @@ The main environment contract is:
 | Postgres | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASS`, or `DATABASE_URL` |
 | Qdrant | `QDRANT_URL`, `QDRANT_COLLECTION`, `QDRANT_PORT`, `QDRANT_GRPC_PORT` |
 | Embeddings | `VOYAGE_API_KEY`, `EMBED_PROVIDER`, `EMBED_BASE_URL`, `EMBED_MODEL`, `EMBED_API_KEY`, `EMBEDDING_DIM` |
-| Contextual batching | `ENABLE_CONTEXTUAL_EMBEDDINGS`, `CONTEXTUAL_WINDOW_TOKENS`, `CONTEXTUAL_WINDOW_MAX_CHUNKS`, `CONTEXTUAL_REQUEST_MAX_GROUPS`, `CONTEXTUAL_REQUEST_MAX_DOCUMENTS`, `CONTEXTUAL_REQUEST_MAX_TOKENS` |
+| Contextual batching | `ENABLE_CONTEXTUAL_EMBEDDINGS`, `CONTEXTUAL_WINDOW_TOKENS`, `CONTEXTUAL_WINDOW_MAX_CHUNKS`, `CONTEXTUAL_TEXT_MAX_TOKENS`, `CONTEXTUAL_REQUEST_MAX_GROUPS`, `CONTEXTUAL_REQUEST_MAX_DOCUMENTS`, `CONTEXTUAL_REQUEST_MAX_TOKENS` |
 | Sparse retrieval | `ENABLE_SPARSE_RETRIEVAL`, `SPARSE_BACKEND`, `SPARSE_VECTOR_NAME`, `QDRANT_SPARSE_MODEL` |
 | Reranking | `ENABLE_RERANKER`, `RERANK_BASE_URL`, `RERANKER_MODEL`, `RERANK_API_KEY`, `RERANK_CANDIDATES`, `NEIGHBOR_WINDOW_SIZE` |
 | Optional LLM extraction | `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_TIMEOUT`, `LLM_RETRIES`, `LLM_TPM_LIMIT` |
 | Runtime location | `VQ_CONFIG_DIR`, `VQ_ENV_FILE` |
+| MCP-tied self-maintenance | `VQ_SELF_MAINTAIN_COLLECTION`, `VQ_SELF_MAINTAIN_INTERVAL_SECONDS`, `VQ_SELF_MAINTAIN_INITIAL_DELAY_SECONDS`, `VQ_SELF_MAINTAIN_MAX_ACTIONS`, `VQ_SELF_MAINTAIN_STATE_FILE` |
+| MCP-tied background index | `VQ_BACKGROUND_INDEX_COLLECTION`, `VQ_BACKGROUND_INDEX_ENABLED`, `VQ_BACKGROUND_INDEX_POLL_SECONDS`, `VQ_BACKGROUND_INDEX_INITIAL_DELAY_SECONDS`, `VQ_BACKGROUND_NEW_FILE_DELAY_SECONDS`, `VQ_BACKGROUND_CHANGED_INDEX_SECONDS`, `VQ_BACKGROUND_EMBED_LIMIT`, `VQ_BACKGROUND_MAX_EMBED_BATCHES` |
 
 See [.env.example](./.env.example) for the current full set of defaults.
 
@@ -482,6 +538,16 @@ src/vaultq/
   cli.py              CLI entrypoint
   tui.py              Textual operator UI
   mcp_server.py       FastMCP server
+  operations.py       Declared MCP/CLI operation contracts
+  policy.py           Vault write policy and path safety checks
+  property_schema.py  Vault frontmatter/type/domain/tag validation
+  write_ops.py        Agent-authored note writes and proposals
+  receipts.py         JSON receipts for mutating operations
+  ai_workspace.py     AI workspace folder conventions
+  graph.py            Link graph extraction, backlinks, and neighbors
+  link_extraction.py  GBrain-derived wikilink/markdown/frontmatter link extraction
+  think.py            Lightweight cited retrieval synthesis
+  maintenance.py      AI workspace maintenance inspection/reporting
   indexer.py          Markdown ingest and update logic
   chunker.py          Heading-aware/token-aware chunking
   embed.py            Pending-row embedding and Qdrant upserts

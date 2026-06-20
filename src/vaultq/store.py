@@ -105,13 +105,53 @@ CREATE TABLE IF NOT EXISTS vq_knowledge_objects (
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS vq_links (
+    id                BIGSERIAL PRIMARY KEY,
+    collection_name   TEXT NOT NULL,
+    source_rel_path   TEXT NOT NULL,
+    target_identifier TEXT NOT NULL,
+    edge_type         TEXT NOT NULL DEFAULT 'links_to',
+    anchor_text       TEXT NOT NULL DEFAULT '',
+    source_kind       TEXT NOT NULL DEFAULT 'markdown',
+    confidence        DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    metadata_json     JSONB NOT NULL DEFAULT '{}'::jsonb,
+    stale             BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (collection_name, source_rel_path, target_identifier, edge_type, anchor_text, source_kind)
+);
+
+CREATE TABLE IF NOT EXISTS vq_runtime_state (
+    name              TEXT PRIMARY KEY,
+    kind              TEXT NOT NULL,
+    collection_name   TEXT,
+    data_json         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vq_documents_rel_path ON vq_documents(collection_id, rel_path);
 CREATE INDEX IF NOT EXISTS idx_vq_chunks_document ON vq_chunks(document_id, chunk_index);
 CREATE INDEX IF NOT EXISTS idx_vq_chunks_pending ON vq_chunks(version, qdrant_point_id);
 CREATE INDEX IF NOT EXISTS idx_vq_chunks_qdrant ON vq_chunks(qdrant_point_id);
+CREATE INDEX IF NOT EXISTS idx_vq_chunks_text_fts ON vq_chunks USING GIN ((
+    setweight(to_tsvector('english', COALESCE(text_content, '')), 'A') ||
+    setweight(to_tsvector('simple', COALESCE(text_content, '')), 'B')
+)) WHERE version = 1;
 CREATE INDEX IF NOT EXISTS idx_vq_knowledge_document ON vq_knowledge_objects(document_id, object_type);
 CREATE INDEX IF NOT EXISTS idx_vq_knowledge_pending ON vq_knowledge_objects(version, qdrant_point_id);
 CREATE INDEX IF NOT EXISTS idx_vq_knowledge_qdrant ON vq_knowledge_objects(qdrant_point_id);
+CREATE INDEX IF NOT EXISTS idx_vq_knowledge_body_fts ON vq_knowledge_objects USING GIN ((
+    setweight(to_tsvector('english', COALESCE(body_text, '')), 'A') ||
+    setweight(to_tsvector('simple', COALESCE(body_text, '')), 'B')
+)) WHERE version = 1;
+CREATE INDEX IF NOT EXISTS idx_vq_documents_title_fts ON vq_documents USING GIN ((
+    setweight(to_tsvector('english', COALESCE(title, '')), 'A') ||
+    setweight(to_tsvector('simple', COALESCE(rel_path, '')), 'B')
+)) WHERE status = 'indexed';
+CREATE INDEX IF NOT EXISTS idx_vq_links_source ON vq_links(collection_name, source_rel_path);
+CREATE INDEX IF NOT EXISTS idx_vq_links_target ON vq_links(collection_name, target_identifier);
+CREATE INDEX IF NOT EXISTS idx_vq_runtime_state_kind ON vq_runtime_state(kind, collection_name);
 """
 
 
@@ -193,9 +233,16 @@ def get_settings() -> Settings:
     )
 
 
+def _db_connect_timeout() -> int:
+    try:
+        return max(1, int(os.getenv("DB_CONNECT_TIMEOUT", "3")))
+    except Exception:
+        return 3
+
+
 def connect(settings: Optional[Settings] = None):
     settings = settings or get_settings()
-    return psycopg.connect(settings.db_dsn, row_factory=dict_row)
+    return psycopg.connect(settings.db_dsn, row_factory=dict_row, connect_timeout=_db_connect_timeout())
 
 
 def ensure_schema(settings: Optional[Settings] = None) -> None:
@@ -257,6 +304,20 @@ def ensure_qdrant_collection(settings: Optional[Settings] = None, reset: bool = 
             raise RuntimeError(
                 f"Failed to create Qdrant collection: {create_resp.status_code} {create_resp.text}"
             )
+
+
+def clear_qdrant_point_ids(settings: Optional[Settings] = None) -> Dict[str, int]:
+    settings = settings or get_settings()
+    with connect(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE vq_chunks SET qdrant_point_id = NULL WHERE qdrant_point_id IS NOT NULL")
+            chunks = cur.rowcount
+            cur.execute(
+                "UPDATE vq_knowledge_objects SET qdrant_point_id = NULL WHERE qdrant_point_id IS NOT NULL"
+            )
+            knowledge_objects = cur.rowcount
+        conn.commit()
+    return {"chunks": max(0, int(chunks or 0)), "knowledge_objects": max(0, int(knowledge_objects or 0))}
 
 
 def delete_qdrant_points(point_ids: Sequence[str], settings: Optional[Settings] = None) -> int:

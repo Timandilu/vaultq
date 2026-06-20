@@ -12,6 +12,7 @@ from textual.widgets import Button, DataTable, Footer, Header, Input, Log, Markd
 
 from vaultq.doctor import run_doctor
 from vaultq.embed import embed_pending
+from vaultq.chunk_stats import chunk_length_stats
 from vaultq.indexer import run_index
 from vaultq.search import search
 from vaultq.store import (
@@ -120,7 +121,7 @@ class VaultQTui(App[None]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(
-            "[b]VaultQ[/b]\nPortable markdown-vault ingestion, contextual Voyage embeddings, hybrid retrieval, and MCP export.",
+            "[b]VaultQ[/b]\nAgent-native markdown vault, Atlas/Voyage retrieval, graph signals, MCP tools, and autonomous workspace maintenance.",
             id="hero",
         )
         with TabbedContent(initial="overview"):
@@ -132,7 +133,7 @@ class VaultQTui(App[None]):
                 yield Input(placeholder="Pattern, e.g. **/*.md", value="**/*.md", id="collection_pattern", classes="row")
                 yield Input(
                     placeholder="Exclude globs, comma separated",
-                    value=".obsidian/**, .git/**, node_modules/**",
+                    value=".obsidian/**, .trash/**, .vaultq/**, 88_Agents/sessions/**",
                     id="collection_excludes",
                     classes="row",
                 )
@@ -151,9 +152,18 @@ class VaultQTui(App[None]):
                     yield Button("Refresh Status", id="refresh_status", classes="cta")
                 yield Markdown(id="status_markdown", classes="panel")
                 yield Log(id="pipeline_log", classes="panel", auto_scroll=True)
+            with TabPane("Agent", id="agent"):
+                with Horizontal(classes="button-row"):
+                    yield Button("Prepare Runtime", id="agent_prepare", variant="primary", classes="cta")
+                    yield Button("Dry Run Maintenance", id="agent_maintain_dry", classes="cta")
+                    yield Button("Run Maintenance", id="agent_maintain", classes="cta")
+                    yield Button("Refresh Agent Status", id="agent_status", classes="cta")
+                yield Markdown(id="agent_markdown", classes="panel")
             with TabPane("Search", id="search"):
                 yield Input(placeholder="Search the vault", id="search_query", classes="row")
                 with Horizontal(classes="button-row"):
+                    yield Button("Related Work", id="search_related", variant="primary", classes="cta")
+                    yield Button("Focused Search", id="search_focused", variant="primary", classes="cta")
                     yield Button("Hybrid Search", id="search_hybrid", variant="primary", classes="cta")
                     yield Button("Semantic Search", id="search_semantic", classes="cta")
                     yield Button("Keyword Search", id="search_keyword", classes="cta")
@@ -175,12 +185,14 @@ class VaultQTui(App[None]):
         self._refresh_collections_view()
         self._refresh_overview()
         self._refresh_mcp_view()
+        self._refresh_agent_view()
         self._log("VaultQ TUI ready.")
 
     def action_refresh(self) -> None:
         self._refresh_collections_view()
         self._refresh_overview()
         self._refresh_mcp_view()
+        self._refresh_agent_view()
         self._log("Refreshed dashboard.")
 
     def action_initialize(self) -> None:
@@ -210,6 +222,18 @@ class VaultQTui(App[None]):
             self._run_job("doctor", lambda: run_doctor(live=True), refresh=False)
         elif button_id == "refresh_status":
             self._refresh_overview()
+        elif button_id == "agent_prepare":
+            self._run_job("agent prepare", self._job_agent_prepare, refresh=True)
+        elif button_id == "agent_maintain_dry":
+            self._run_job("agent maintenance dry-run", lambda: self._job_agent_maintain(dry_run=True), refresh=True)
+        elif button_id == "agent_maintain":
+            self._run_job("agent maintenance", lambda: self._job_agent_maintain(dry_run=False), refresh=True)
+        elif button_id == "agent_status":
+            self._refresh_agent_view()
+        elif button_id == "search_related":
+            self._run_related()
+        elif button_id == "search_focused":
+            self._run_search("focused")
         elif button_id == "search_hybrid":
             self._run_search("hybrid")
         elif button_id == "search_semantic":
@@ -231,6 +255,29 @@ class VaultQTui(App[None]):
         ensure_schema()
         ensure_qdrant_collection()
         return {"config_path": str(config_path(self.base_dir)), "status": "initialized"}
+
+    def _default_collection_root(self) -> Optional[Path]:
+        config = read_config(self.base_dir)
+        collections = config.get("collections") or []
+        if not collections:
+            return None
+        return Path(collections[0]["path"]).expanduser().resolve()
+
+    def _job_agent_prepare(self) -> Dict[str, Any]:
+        from vaultq.agent_runtime import prepare_background_agent
+
+        root = self._default_collection_root()
+        if root is None:
+            raise ValueError("Configure a collection before preparing the agent runtime.")
+        return prepare_background_agent(root, write_sheet=True)
+
+    def _job_agent_maintain(self, *, dry_run: bool) -> Dict[str, Any]:
+        from vaultq.agent_runtime import run_autonomous_maintenance
+
+        root = self._default_collection_root()
+        if root is None:
+            raise ValueError("Configure a collection before running agent maintenance.")
+        return run_autonomous_maintenance(root, dry_run=dry_run, max_actions=20)
 
     def _run_job(self, label: str, func, *, refresh: bool = False) -> None:
         self._log(f"{label}: started")
@@ -255,6 +302,7 @@ class VaultQTui(App[None]):
         if refresh:
             self._refresh_overview()
             self._refresh_collections_view()
+            self._refresh_agent_view()
 
     def _add_collection(self) -> None:
         name = self.query_one("#collection_name", Input).value.strip()
@@ -297,6 +345,62 @@ class VaultQTui(App[None]):
         self._log(f"search {retrieval_mode}: started")
         self.run_worker(job, thread=True, exclusive=False)
 
+    def _run_related(self) -> None:
+        query = self.query_one("#search_query", Input).value.strip()
+        if not query:
+            self._log("related work: idea/query is required")
+            return
+
+        def job() -> None:
+            try:
+                from vaultq.related import related_work
+
+                result = related_work(query, limit=8)
+            except Exception as exc:
+                self.call_from_thread(self._job_failed, "related work", exc)
+                return
+            self.call_from_thread(self._apply_related_result, result)
+
+        self._log("related work: started")
+        self.run_worker(job, thread=True, exclusive=False)
+
+    def _apply_related_result(self, payload: Dict[str, Any]) -> None:
+        self.search_results = [
+            {
+                **row,
+                "doc_type": "related",
+                "heading_path": row.get("connection_reason") or "",
+            }
+            for row in payload.get("connections", [])
+        ]
+        table = self.query_one("#results_table", DataTable)
+        table.clear(columns=False)
+        for index, result in enumerate(self.search_results):
+            table.add_row(
+                f"{float(result.get('score') or 0.0):.4f}",
+                "related",
+                result.get("rel_path") or "",
+                result.get("connection_reason") or "",
+                key=str(result.get("id") or f"related-{index}"),
+            )
+        if self.search_results:
+            self.query_one("#result_markdown", Markdown).update(
+                "\n".join(
+                    [
+                        "## Related Work",
+                        "",
+                        f"- Suggested home: `{(payload.get('suggested_existing_home') or {}).get('rel_path') or 'none'}`",
+                        f"- Write default: `{payload.get('write_default')}`",
+                        "",
+                        self._result_markdown(self.search_results[0]),
+                    ]
+                )
+            )
+            self._log(f"related work completed: {len(self.search_results)} connection(s)")
+        else:
+            self.query_one("#result_markdown", Markdown).update("## No related work\n\nCreate only under the agent workspace if a note is still needed.")
+            self._log("related work completed: no connections")
+
     def _apply_search_result(self, payload: Dict[str, Any]) -> None:
         self.search_results = list(payload.get("results") or [])
         table = self.query_one("#results_table", DataTable)
@@ -325,17 +429,25 @@ class VaultQTui(App[None]):
             return
         self.watch_stop_event = Event()
         self.watch_running = True
-        self._log("watch: starting (chunks-only, interval=2s, embed_limit=200)")
+        self._log("watch: starting (low-impact, idle_tick=300s, new_file_scan=600s, changed_refresh=86400s)")
 
         def worker() -> None:
             try:
+                from vaultq.background_index import background_state_name
+
                 result = run_watch(
                     base_dir=self.base_dir,
-                    poll_interval=2.0,
+                    poll_interval=300.0,
                     skip_knowledge=True,
-                    embed_limit=200,
-                    max_embed_batches=4,
+                    embed_limit=100,
+                    max_embed_batches=1,
+                    new_file_index_delay_seconds=600.0,
+                    changed_index_interval_seconds=86400.0,
+                    no_initial_sync=True,
                     stop_event=self.watch_stop_event,
+                    state_name=background_state_name("all"),
+                    state_worker="tui",
+                    drain_existing_pending=True,
                     logger=lambda message: self.call_from_thread(self._log, message),
                 )
             except Exception as exc:
@@ -380,6 +492,18 @@ class VaultQTui(App[None]):
     def _refresh_overview(self) -> None:
         try:
             status = status_snapshot()
+            from vaultq.background_index import background_index_status
+
+            background_status = background_index_status()
+            background_states = background_status.get("states") or []
+            background_summary = "none"
+            if background_states:
+                latest = background_states[0]
+                data = latest.get("data_json") or {}
+                background_summary = f"{latest.get('collection_name') or 'unknown'} updated {latest.get('updated_at')} loops={data.get('summary', {}).get('loops', 0)}"
+            chunk_stats = chunk_length_stats(sample_limit=5)
+            chunk_summary = chunk_stats["summary"]
+            chunk_assessment = chunk_stats["assessment"]
             configured = read_config(self.base_dir).get("collections", [])
             collection_names = ", ".join(row["name"] for row in configured) if configured else "none"
             markdown = "\n".join(
@@ -390,16 +514,21 @@ class VaultQTui(App[None]):
                     f"- Collections in DB: `{collection_names}`",
                     f"- Documents: `{status['documents']}`",
                     f"- Chunks: `{status['chunks']}`",
+                    f"- Chunk p50/p95/max: `{chunk_summary['p50_tokens']:.0f}` / `{chunk_summary['p95_tokens']:.0f}` / `{chunk_summary['max_tokens']}` tokens",
+                    f"- Chunk health: `{chunk_assessment['overall']}` (`{chunk_assessment['over_max_pct']}%` over max)",
                     f"- Knowledge objects: `{status['knowledge_objects']}`",
                     f"- Pending chunk embeddings: `{status['pending_chunk_embeddings']}`",
                     f"- Pending knowledge embeddings: `{status['pending_knowledge_embeddings']}`",
                     f"- Watch mode: `{'running' if self.watch_running else 'stopped'}`",
+                    f"- Background index state: `{background_summary}`",
                     f"- Dense model: `{status['embedding_model']}`",
                     f"- Provider: `{status['embedding_provider']}`",
                     f"- Reranker: `{status['reranker_model']}`",
                     f"- Contextual embeddings: `{status['contextual_embeddings']}`",
                     f"- Qdrant collection: `{status['qdrant_collection']}`",
                     f"- Qdrant URL: `{status['qdrant_url']}`",
+                    f"- Agent workspace: `14_Agent_Workspace`",
+                    f"- Session transcript index: `excluded via 88_Agents/sessions/**`",
                 ]
             )
         except Exception as exc:
@@ -416,6 +545,54 @@ class VaultQTui(App[None]):
         self.query_one("#overview_markdown", Markdown).update(markdown)
         self.query_one("#status_markdown", Markdown).update(markdown)
 
+    def _refresh_agent_view(self) -> None:
+        try:
+            from vaultq.agent_runtime import AGENT_RUNTIME_FILE, runtime_config
+            from vaultq.maintenance import inspect_ai_workspace
+            from vaultq.policy import load_policy
+            from vaultq.property_schema import load_property_schema
+
+            root = self._default_collection_root()
+            if root is None:
+                raise ValueError("No collection configured.")
+            policy = load_policy(root)
+            schema = load_property_schema(root)
+            workspace = inspect_ai_workspace(root)
+            runtime_path = root / AGENT_RUNTIME_FILE
+            runtime = json.loads(runtime_path.read_text(encoding="utf-8")) if runtime_path.exists() else runtime_config(root)
+            markdown = "\n".join(
+                [
+                    "# Agent Runtime",
+                    "",
+                    f"- Workspace: `{runtime['workspace_root']}`",
+                    f"- Mode: `{runtime['mode']}`",
+                    f"- Runtime config: `{runtime_path}`",
+                    f"- Background enabled: `{runtime['enabled']}`",
+                    f"- Prepared only: `{runtime['prepared_only']}`",
+                    f"- Allowed write roots: `{', '.join(policy.allowed_roots)}`",
+                    f"- Markdown files in workspace: `{workspace['markdown_files']}`",
+                    f"- Proposal files: `{workspace['proposal_files']}`",
+                    f"- Report/run files: `{workspace['report_files']}`",
+                    f"- Required agent provenance: `created_by: agent`",
+                    f"- Allowed created_by values: `{', '.join(schema.allowed_created_by)}`",
+                    "",
+                    "## Autonomous Maintenance",
+                    "",
+                    "A live pass promotes agent-authored notes inside `14_Agent_Workspace`, writes promotion ledger entries, writes idea clusters, and updates `Human Updates/Latest Agent Workspace Update.md`. It does not mutate canonical vault folders.",
+                ]
+            )
+        except Exception as exc:
+            markdown = "\n".join(
+                [
+                    "# Agent Runtime",
+                    "",
+                    "Agent status is unavailable.",
+                    "",
+                    f"- Error: `{exc}`",
+                ]
+            )
+        self.query_one("#agent_markdown", Markdown).update(markdown)
+
     def _refresh_mcp_view(self) -> None:
         self.query_one("#mcp_markdown", Markdown).update(
             "\n".join(
@@ -431,16 +608,35 @@ class VaultQTui(App[None]):
                     "HTTP transport:",
                     "",
                     "```bash",
-                    "vq mcp --transport http --host 127.0.0.1 --port 7070",
+                    "vq mcp --transport http --host 127.0.0.1 --port 7073",
                     "```",
                     "",
                     "Tool surface:",
                     "",
                     "- `vaultq_status`",
                     "- `vaultq_collection_list`",
+                    "- `vaultq_operation_list`",
+                    "- `vaultq_chunk_stats`",
+                    "- `vaultq_background_status`",
                     "- `vaultq_search`",
                     "- `vaultq_query`",
+                    "- `vaultq_related_work`",
+                    "- `vaultq_semantic_clusters`",
                     "- `vaultq_get_doc`",
+                    "- `vaultq_write_status`",
+                    "- `vaultq_capture`",
+                    "- `vaultq_note_put`",
+                    "- `vaultq_note_append`",
+                    "- `vaultq_note_propose`",
+                    "- `vaultq_property_propose`",
+                    "- `vaultq_graph_extract`",
+                    "- `vaultq_graph_neighbors`",
+                    "- `vaultq_graph_backlinks`",
+                    "- `vaultq_graph_traverse`",
+                    "- `vaultq_think`",
+                    "- `vaultq_maintain`",
+                    "- `vaultq_agent_prepare`",
+                    "- `vaultq_agent_maintain`",
                 ]
             )
         )

@@ -90,7 +90,7 @@ def hybrid_batch_size(default: int = 16) -> int:
     return max(1, _env_int("HYBRID_BATCH_SIZE", _env_int("EMBED_BATCH_SIZE", default)))
 
 
-def contextual_request_max_groups(default: int = 8) -> int:
+def contextual_request_max_groups(default: int = 4) -> int:
     return max(1, _env_int("CONTEXTUAL_REQUEST_MAX_GROUPS", default))
 
 

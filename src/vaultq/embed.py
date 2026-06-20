@@ -55,15 +55,19 @@ def _contextual_request_max_documents() -> int:
 
 
 def _contextual_request_max_tokens() -> int:
-    return max(1024, _env_int("CONTEXTUAL_REQUEST_MAX_TOKENS", 100000))
+    return max(1024, _env_int("CONTEXTUAL_REQUEST_MAX_TOKENS", 40000))
 
 
 def _embedding_window_tokens() -> int:
-    return max(1024, _env_int("CONTEXTUAL_WINDOW_TOKENS", 28000))
+    return max(1024, _env_int("CONTEXTUAL_WINDOW_TOKENS", 12000))
 
 
 def _embedding_window_chunks() -> int:
-    return max(1, _env_int("CONTEXTUAL_WINDOW_MAX_CHUNKS", 96))
+    return max(1, _env_int("CONTEXTUAL_WINDOW_MAX_CHUNKS", 32))
+
+
+def _contextual_text_max_tokens() -> int:
+    return max(512, _env_int("CONTEXTUAL_TEXT_MAX_TOKENS", min(6000, _embedding_window_tokens())))
 
 
 def _qdrant_connect_timeout() -> float:
@@ -87,6 +91,46 @@ def _clean_text(value: Any) -> str:
 
 def _estimate_tokens(text: str) -> int:
     return max(1, len(_clean_text(text).split()))
+
+
+def _word_embedding_token_estimate(word: str) -> int:
+    return max(2, (len(word) + 2) // 3)
+
+
+def _estimate_embedding_tokens(text: str) -> int:
+    clean = _clean_text(text)
+    if not clean:
+        return 1
+    word_estimate = sum(_word_embedding_token_estimate(word) for word in clean.split())
+    return max(1, word_estimate, (len(clean) + 2) // 3)
+
+
+def _bounded_contextual_text(text: str) -> str:
+    clean = _clean_text(text)
+    max_tokens = _contextual_text_max_tokens()
+    if _estimate_embedding_tokens(clean) <= max_tokens:
+        return clean
+
+    words = clean.split()
+    bounded: List[str] = []
+    word_estimate = 0
+    char_count = 0
+    for word in words:
+        next_word_estimate = word_estimate + _word_embedding_token_estimate(word)
+        next_char_count = char_count + (1 if bounded else 0) + len(word)
+        next_estimate = max(next_word_estimate, (next_char_count + 2) // 3)
+        if next_estimate > max_tokens:
+            break
+        bounded.append(word)
+        word_estimate = next_word_estimate
+        char_count = next_char_count
+    return " ".join(bounded).strip() or clean[: max(1, max_tokens * 3)].strip()
+
+
+def _document_embedding_token_count(doc: Dict[str, Any]) -> int:
+    actual = _estimate_embedding_tokens(doc.get("text") or "")
+    declared = int(doc.get("token_count") or 0)
+    return max(1, actual, declared)
 
 
 def _build_contextualized_chunk_text(row: Dict[str, Any]) -> str:
@@ -238,7 +282,7 @@ def _fetch_pending_chunk_documents(limit: int) -> List[Dict[str, Any]]:
                 metadata = {}
         raw_text = row.get("text_content") or ""
         contextual_text = _build_contextualized_chunk_text(row)
-        embed_text = raw_text if use_contextualized_chunk_embeddings() else contextual_text
+        embed_text = _bounded_contextual_text(raw_text) if use_contextualized_chunk_embeddings() else contextual_text
         payload = {
             "record_type": "chunk",
             "doc_type": "markdown_chunk",
@@ -269,7 +313,11 @@ def _fetch_pending_chunk_documents(limit: int) -> List[Dict[str, Any]]:
                 "payload": payload,
                 "source_key": f"document:{row['document_id']}",
                 "source_order": int(row.get("chunk_index") or 0),
-                "token_count": int(metadata.get("token_count") or _estimate_tokens(raw_text)),
+                "token_count": (
+                    _estimate_embedding_tokens(embed_text)
+                    if use_contextualized_chunk_embeddings()
+                    else int(metadata.get("token_count") or _estimate_tokens(raw_text))
+                ),
             }
         )
     return documents
@@ -323,7 +371,7 @@ def _fetch_pending_knowledge_documents(limit: int) -> List[Dict[str, Any]]:
                 source_chunk_ids = []
         raw_text = row.get("body_text") or ""
         contextual_text = _build_contextualized_knowledge_text(row)
-        embed_text = raw_text if use_contextualized_chunk_embeddings() else contextual_text
+        embed_text = _bounded_contextual_text(raw_text) if use_contextualized_chunk_embeddings() else contextual_text
         payload = {
             "record_type": "knowledge_object",
             "doc_type": row.get("object_type") or "knowledge_object",
@@ -350,7 +398,9 @@ def _fetch_pending_knowledge_documents(limit: int) -> List[Dict[str, Any]]:
                 "payload": payload,
                 "source_key": f"document:{row['document_id']}",
                 "source_order": int(row["id"]),
-                "token_count": _estimate_tokens(raw_text),
+                "token_count": _estimate_embedding_tokens(embed_text)
+                if use_contextualized_chunk_embeddings()
+                else _estimate_tokens(raw_text),
             }
         )
     return documents
@@ -420,7 +470,7 @@ def _embedding_batches(documents: List[Dict[str, Any]]) -> List[List[Dict[str, A
     chunk_limit = _embedding_window_chunks()
     for doc in documents:
         source_key = str(doc.get("source_key") or "")
-        doc_tokens = max(1, int(doc.get("token_count") or _estimate_tokens(doc.get("text") or "")))
+        doc_tokens = _document_embedding_token_count(doc)
         should_flush = bool(
             current
             and (

@@ -38,6 +38,30 @@ _PROVIDER_DEFAULTS = {
     },
 }
 
+_EMBED_ENV_KEYS = {
+    "ATLAS_API_KEY",
+    "EMBED_API_KEY",
+    "EMBED_APP_NAME",
+    "EMBED_BASE_URL",
+    "EMBED_MODEL",
+    "EMBED_PROVIDER",
+    "EMBED_SITE_URL",
+    "EMBEDDING_DIM",
+    "EMBEDDING_MODEL",
+    "ENABLE_CONTEXTUAL_EMBEDDINGS",
+    "ENABLE_RERANKER",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENROUTER_API_KEY",
+    "OPENROUTER_APP_NAME",
+    "OPENROUTER_SITE_URL",
+    "RERANK_API_KEY",
+    "RERANK_BASE_URL",
+    "RERANK_CANDIDATES",
+    "RERANKER_MODEL",
+    "VOYAGE_API_KEY",
+}
+
 
 @dataclass(frozen=True)
 class ApiProviderConfig:
@@ -79,6 +103,48 @@ def load_env_file(path: Path, override: bool = False) -> bool:
     return _simple_load_dotenv(path, override=override)
 
 
+def _selected_load_dotenv(path: Path, allowed_keys: set[str], override: bool = False) -> bool:
+    if not path.exists():
+        return False
+    loaded = False
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key not in allowed_keys:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if override or not _clean(os.getenv(key)):
+            os.environ[key] = os.path.expandvars(value)
+            loaded = True
+    return loaded
+
+
+def _embedding_env_fallbacks(root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    explicit = (os.getenv("VQ_EMBED_ENV_FILE") or "").strip()
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    parent = root.parent
+    candidates.extend(
+        [
+            parent / "copyvector_mcp" / "copyvector_embed_pipeline" / ".env",
+            parent / "copyvector_mcp" / "mcp_runtime" / ".env",
+            parent / "markvis_ecom_mcp" / ".env",
+            parent / ".ai-embedding.env",
+        ]
+    )
+    return list(dict.fromkeys(path.resolve() for path in candidates if path))
+
+
 def load_env_layers(project_root: Optional[Path] = None) -> None:
     root = Path(project_root or Path(__file__).resolve().parents[2])
     repo_env = root / ".env"
@@ -93,6 +159,9 @@ def load_env_layers(project_root: Optional[Path] = None) -> None:
         explicit_path = Path(explicit).expanduser().resolve()
         if explicit_path.exists():
             load_env_file(explicit_path, override=True)
+    for fallback_path in _embedding_env_fallbacks(root):
+        if fallback_path.exists():
+            _selected_load_dotenv(fallback_path, _EMBED_ENV_KEYS, override=False)
 
 
 def _clean(value: Optional[str]) -> str:

@@ -80,7 +80,7 @@ def _write_markdown(root: Path, rel_path: str, frontmatter: Dict[str, Any], body
         "path": decision.rel_path,
         "receipt_path": receipt_path,
         "indexed": False,
-        "next_step": "run `vq index --collection <name> --limit 1 && vq embed --limit 20` if immediate retrieval is needed",
+        "next_step": "background indexing/embedding will pick this up; run `vq index --collection <name> --limit 1 && vq embed --limit 20` only if immediate semantic retrieval is required",
     }
 
 

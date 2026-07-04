@@ -15,6 +15,7 @@ import yaml
 from vaultq.chunker import Chunk, chunk_markdown
 from vaultq.enrich import ChunkRow, KnowledgeExtractor, build_extractor, dedupe_knowledge_objects
 from vaultq.store import connect, delete_qdrant_points, read_config, upsert_collection_rows
+from vaultq.write_lock import acquire_index_write_lock
 
 logger = logging.getLogger("vaultq.indexer")
 
@@ -334,6 +335,7 @@ def run_index_path(
     collection_name: Optional[str] = None,
     force: bool = True,
     skip_knowledge: bool = True,
+    lock_timeout_seconds: Optional[float] = None,
 ) -> IndexStats:
     return run_index_paths(
         [rel_path],
@@ -341,10 +343,34 @@ def run_index_path(
         collection_name=collection_name,
         force=force,
         skip_knowledge=skip_knowledge,
+        lock_timeout_seconds=lock_timeout_seconds,
     )
 
 
 def run_index_paths(
+    rel_paths: Sequence[str],
+    *,
+    base_dir: Optional[Path] = None,
+    collection_name: Optional[str] = None,
+    force: bool = True,
+    skip_knowledge: bool = True,
+    lock_timeout_seconds: Optional[float] = None,
+) -> IndexStats:
+    with acquire_index_write_lock(
+        base_dir=base_dir,
+        owner="run_index_paths",
+        timeout_seconds=lock_timeout_seconds,
+    ):
+        return _run_index_paths_unlocked(
+            rel_paths,
+            base_dir=base_dir,
+            collection_name=collection_name,
+            force=force,
+            skip_knowledge=skip_knowledge,
+        )
+
+
+def _run_index_paths_unlocked(
     rel_paths: Sequence[str],
     *,
     base_dir: Optional[Path] = None,
@@ -483,6 +509,26 @@ def run_refresh_changed_paths(
     collection_name: Optional[str] = None,
     skip_knowledge: bool = True,
     limit: Optional[int] = None,
+    lock_timeout_seconds: Optional[float] = None,
+) -> IndexStats:
+    with acquire_index_write_lock(
+        base_dir=base_dir,
+        owner="run_refresh_changed_paths",
+        timeout_seconds=lock_timeout_seconds,
+    ):
+        return _run_refresh_changed_paths_unlocked(
+            base_dir=base_dir,
+            collection_name=collection_name,
+            skip_knowledge=skip_knowledge,
+            limit=limit,
+        )
+
+
+def _run_refresh_changed_paths_unlocked(
+    base_dir: Optional[Path] = None,
+    collection_name: Optional[str] = None,
+    skip_knowledge: bool = True,
+    limit: Optional[int] = None,
 ) -> IndexStats:
     collection_ids = upsert_collection_rows(base_dir)
     config = read_config(base_dir)
@@ -561,6 +607,28 @@ def run_refresh_changed_paths(
 
 
 def run_index(
+    base_dir: Optional[Path] = None,
+    collection_name: Optional[str] = None,
+    force: bool = False,
+    skip_knowledge: bool = False,
+    limit: Optional[int] = None,
+    lock_timeout_seconds: Optional[float] = None,
+) -> IndexStats:
+    with acquire_index_write_lock(
+        base_dir=base_dir,
+        owner="run_index",
+        timeout_seconds=lock_timeout_seconds,
+    ):
+        return _run_index_unlocked(
+            base_dir=base_dir,
+            collection_name=collection_name,
+            force=force,
+            skip_knowledge=skip_knowledge,
+            limit=limit,
+        )
+
+
+def _run_index_unlocked(
     base_dir: Optional[Path] = None,
     collection_name: Optional[str] = None,
     force: bool = False,

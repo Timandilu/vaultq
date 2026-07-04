@@ -204,7 +204,6 @@ def _drain_embeddings(
     logger: Logger,
 ) -> Dict[str, int]:
     from vaultq.embed import embed_pending
-    from vaultq.store import status_snapshot
 
     kinds = "chunks" if skip_knowledge else "both"
     batch_count = 0
@@ -212,10 +211,7 @@ def _drain_embeddings(
     while True:
         if max_embed_batches > 0 and batch_count >= max_embed_batches:
             break
-        pending = status_snapshot()
-        pending_total = int(pending.get("pending_chunk_embeddings") or 0)
-        if not skip_knowledge:
-            pending_total += int(pending.get("pending_knowledge_embeddings") or 0)
+        pending_total = _pending_embedding_count(skip_knowledge=skip_knowledge)
         if pending_total <= 0:
             break
         result = embed_pending(kinds=kinds, limit=embed_limit)
@@ -231,15 +227,22 @@ def _drain_embeddings(
         )
         if embedded < embed_limit:
             break
-    pending_after = status_snapshot()
-    pending_remaining = int(pending_after.get("pending_chunk_embeddings") or 0)
-    if not skip_knowledge:
-        pending_remaining += int(pending_after.get("pending_knowledge_embeddings") or 0)
+    pending_remaining = _pending_embedding_count(skip_knowledge=skip_knowledge)
     return {
         "embed_batches": batch_count,
         "embeddings_written": embeddings_written,
         "pending_remaining": pending_remaining,
     }
+
+
+def _pending_embedding_count(*, skip_knowledge: bool) -> int:
+    from vaultq.store import status_snapshot
+
+    pending = status_snapshot()
+    pending_total = int(pending.get("pending_chunk_embeddings") or 0)
+    if not skip_knowledge:
+        pending_total += int(pending.get("pending_knowledge_embeddings") or 0)
+    return pending_total
 
 
 def run_watch(
@@ -252,6 +255,7 @@ def run_watch(
     max_embed_batches: int = 4,
     new_file_index_delay_seconds: float = 600.0,
     changed_index_interval_seconds: float = 86400.0,
+    pending_embed_interval_seconds: float = 300.0,
     once: bool = False,
     no_initial_sync: bool = False,
     max_loops: Optional[int] = None,
@@ -267,9 +271,11 @@ def run_watch(
     next_new_file_scan_at: Optional[float] = None
     next_changed_index_at: Optional[float] = None
     next_pending_embed_at: Optional[float] = None
+    next_pending_embed_check_at: Optional[float] = None
     checked_existing_pending = False
     new_file_index_delay_seconds = max(0.0, float(new_file_index_delay_seconds))
     changed_index_interval_seconds = max(0.0, float(changed_index_interval_seconds))
+    pending_embed_interval_seconds = max(0.0, float(pending_embed_interval_seconds))
     if no_initial_sync:
         previous_path_snapshot = _build_path_snapshot(base_dir=base_dir, collection_name=collection_name)
         _record_path_summary(summary, previous_path_snapshot)
@@ -288,12 +294,9 @@ def run_watch(
         if drain_existing_pending and not checked_existing_pending:
             checked_existing_pending = True
             try:
-                pending_snapshot = status_snapshot()
-                pending_existing = int(pending_snapshot.get("pending_chunk_embeddings") or 0)
-                if not skip_knowledge:
-                    pending_existing += int(pending_snapshot.get("pending_knowledge_embeddings") or 0)
-                if pending_existing > 0:
-                    next_pending_embed_at = now + new_file_index_delay_seconds
+                pending_existing = _pending_embedding_count(skip_knowledge=skip_knowledge)
+                if pending_existing > 0 and pending_embed_interval_seconds > 0:
+                    next_pending_embed_at = now + pending_embed_interval_seconds
                     _log(logger, f"watch: scheduled pending embedding drain ({pending_existing} vectors)")
             except Exception as exc:
                 _log(logger, f"watch: pending embedding check failed ({exc.__class__.__name__}: {exc})")
@@ -301,8 +304,16 @@ def run_watch(
         due_new_paths: Dict[str, list[str]] = {}
         due_changed_collections: list[str] = []
         due_pending_embed = next_pending_embed_at is not None and now >= next_pending_embed_at
+        if pending_embed_interval_seconds > 0 and next_pending_embed_check_at is None:
+            next_pending_embed_check_at = now + pending_embed_interval_seconds
+        due_pending_embed_check = (
+            pending_embed_interval_seconds > 0
+            and next_pending_embed_check_at is not None
+            and now >= next_pending_embed_check_at
+        )
         state_next_new_file_scan_at: Optional[datetime] = None
         state_next_changed_refresh_at: Optional[datetime] = None
+        state_next_pending_embed_at: Optional[datetime] = None
 
         if next_new_file_scan_at is None:
             next_new_file_scan_at = now + new_file_index_delay_seconds
@@ -341,14 +352,18 @@ def run_watch(
                 due_changed_collections = sorted(previous_path_snapshot.keys())
                 next_changed_index_at = now + changed_index_interval_seconds
 
-        wall_now = datetime.now().astimezone()
-        if next_new_file_scan_at is not None:
-            state_next_new_file_scan_at = wall_now + timedelta(seconds=max(0.0, next_new_file_scan_at - now))
-        if next_changed_index_at is not None:
-            state_next_changed_refresh_at = wall_now + timedelta(seconds=max(0.0, next_changed_index_at - now))
-
         summary.new_files_queued = 0
         summary.changed_collections_queued = 0
+
+        if due_pending_embed_check and not due_pending_embed:
+            try:
+                pending_external = _pending_embedding_count(skip_knowledge=skip_knowledge)
+                if pending_external > 0:
+                    due_pending_embed = True
+                    _log(logger, f"watch: pending embeddings discovered ({pending_external} vectors)")
+            except Exception as exc:
+                _log(logger, f"watch: pending embedding check failed ({exc.__class__.__name__}: {exc})")
+            next_pending_embed_check_at = now + pending_embed_interval_seconds
 
         if initial_index_collections:
             from vaultq.indexer import run_index
@@ -420,14 +435,25 @@ def run_watch(
             )
             summary.embed_batches += int(embed_stats["embed_batches"])
             summary.embeddings_written += int(embed_stats["embeddings_written"])
-            if int(embed_stats.get("pending_remaining") or 0) > 0:
-                next_pending_embed_at = now + new_file_index_delay_seconds
+            if int(embed_stats.get("pending_remaining") or 0) > 0 and pending_embed_interval_seconds > 0:
+                next_pending_embed_at = now + pending_embed_interval_seconds
             else:
                 next_pending_embed_at = None
+            if pending_embed_interval_seconds > 0:
+                next_pending_embed_check_at = now + pending_embed_interval_seconds
 
         if state_name:
             try:
                 from vaultq.background_index import record_background_index_state
+
+                wall_now = datetime.now().astimezone()
+                if next_new_file_scan_at is not None:
+                    state_next_new_file_scan_at = wall_now + timedelta(seconds=max(0.0, next_new_file_scan_at - now))
+                if next_changed_index_at is not None:
+                    state_next_changed_refresh_at = wall_now + timedelta(seconds=max(0.0, next_changed_index_at - now))
+                next_pending_state_at = next_pending_embed_at or next_pending_embed_check_at
+                if next_pending_state_at is not None:
+                    state_next_pending_embed_at = wall_now + timedelta(seconds=max(0.0, next_pending_state_at - now))
 
                 record_background_index_state(
                     collection_name=collection_name or "all",
@@ -436,6 +462,7 @@ def run_watch(
                     summary=asdict(summary),
                     next_new_file_scan_at=state_next_new_file_scan_at,
                     next_changed_refresh_at=state_next_changed_refresh_at,
+                    next_pending_embed_at=state_next_pending_embed_at,
                     last_error=None,
                     name=state_name,
                 )

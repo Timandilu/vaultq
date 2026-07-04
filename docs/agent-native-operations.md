@@ -231,8 +231,10 @@ When enabled, the worker:
 - runs one maintenance pass only when that hash changes
 - stores state at `.vaultq/self_maintenance_state.json`
 
-The separate background indexing worker stores its current state in Postgres and
-can be inspected through:
+The separate background indexing worker handles latent retrieval upkeep:
+path-only new-file discovery, daily changed-file refresh, and 5-minute checks
+for pending embeddings left behind by foreground writes. It stores its current
+state in Postgres and can be inspected through:
 
 ```powershell
 vq background status --collection second_brain --json

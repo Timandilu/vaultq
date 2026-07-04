@@ -282,7 +282,7 @@ When VaultQ runs through the MCP startup script, background retrieval upkeep is 
 - the idle poll is only a cheap scheduler wakeup, not a full vault scan
 - new markdown discovery runs as a path-only scan every 10 minutes, then discovered files are indexed and embedded together
 - changed or deleted files trigger a stat-diff incremental chunk refresh at most daily; unchanged files are skipped by stored size/mtime before markdown is read
-- embed batches are capped and follow-up batches are scheduled later if pending vectors remain
+- pending embeddings left by foreground index/write commands are checked every 5 minutes and drained in capped follow-up batches
 
 For the Second Brain startup script, the current defaults are:
 
@@ -290,12 +290,19 @@ For the Second Brain startup script, the current defaults are:
 idle scheduler wakeup: 300 seconds
 new file path scan: 600 seconds
 changed chunk refresh: 86400 seconds
-embed limit: 100
-max embed batches per pass: 1
+pending embed check: 300 seconds
+embed limit: 200
+max embed batches per pass: 2
 ```
 
 The worker writes status into Postgres, so agents can inspect state through
 `vaultq_background_status` without reading logs.
+
+Operational rule for agents: pending embeddings are not a normal blocker.
+If the MCP background worker is enabled, leave them for the 5-minute latent
+worker unless the user explicitly needs immediate semantic retrieval of the
+newly written note in the same turn. For same-turn closeout, cite the file
+readback plus `vaultq_background_status` instead of waiting on a full drain.
 
 The self-maintenance contract is autonomous first, reversible always.
 
@@ -359,8 +366,8 @@ If retrieval quality drops:
 1. Run `vq doctor --live --json`.
 2. Run `vq chunks stats --collection second_brain --json`.
 3. Compare `vq search` with `vq query`.
-4. Re-index changed notes.
-5. Embed pending chunks.
+4. Check `vaultq_background_status` to confirm the latent worker is enabled.
+5. Re-index/embed manually only when immediate semantic retrieval is required.
 6. Re-run graph extraction if link context looks stale.
 
 ## Agent Prompt Snippet

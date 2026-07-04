@@ -126,7 +126,10 @@ Embed a controlled batch:
 python -m vaultq.cli embed --kinds chunks --limit 1000 --json
 ```
 
-Embed all pending chunks with a loop:
+Embed all pending chunks with a loop only for an explicit foreground rebuild or
+same-turn semantic retrieval requirement. In normal agent sessions, use
+`vq background status --collection second_brain --json` and let the MCP-tied
+background worker drain pending embeddings.
 
 ```powershell
 $env:VQ_CONFIG_DIR='C:\Users\Timan\Workspace\AI\vaultq\.vaultq'
@@ -149,9 +152,11 @@ vault:
 2. new-file discovery is a path-only scan on the configured delay
 3. new files are indexed in a batch, then pending embeddings are drained within
    the configured batch cap
-4. changed/deleted refresh runs on the longer interval and compares stored file
+4. pending embeddings left behind by foreground index/write commands are checked
+   on `VQ_BACKGROUND_PENDING_EMBED_SECONDS` and drained in bounded batches
+5. changed/deleted refresh runs on the longer interval and compares stored file
    size plus mtime metadata before reading markdown
-5. unchanged files are skipped; changed files are re-chunked; deleted documents
+6. unchanged files are skipped; changed files are re-chunked; deleted documents
    have stale Qdrant point ids removed
 
 Inspect worker state:

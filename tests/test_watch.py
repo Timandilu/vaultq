@@ -33,6 +33,7 @@ def test_watch_does_not_rescan_files_on_every_idle_poll(monkeypatch) -> None:
         poll_interval=60,
         new_file_index_delay_seconds=600,
         changed_index_interval_seconds=86400,
+        pending_embed_interval_seconds=0,
         clock=lambda: now_values.pop(0),
     )
 
@@ -73,6 +74,7 @@ def test_watch_batches_new_file_indexing_on_lagged_path_scan(monkeypatch) -> Non
         poll_interval=60,
         new_file_index_delay_seconds=600,
         changed_index_interval_seconds=86400,
+        pending_embed_interval_seconds=0,
         clock=lambda: now_values.pop(0),
     )
 
@@ -113,6 +115,7 @@ def test_watch_runs_daily_changed_refresh_without_frequent_full_snapshots(monkey
         poll_interval=60,
         new_file_index_delay_seconds=600,
         changed_index_interval_seconds=86400,
+        pending_embed_interval_seconds=0,
         clock=lambda: now_values.pop(0),
     )
 
@@ -152,6 +155,7 @@ def test_watch_continues_capped_embedding_batches_without_full_snapshots(monkeyp
     monkeypatch.setattr(watch, "_build_path_snapshot", fake_path_snapshot, raising=False)
     monkeypatch.setattr("vaultq.indexer.run_index_paths", fake_run_index_paths, raising=False)
     monkeypatch.setattr(watch, "_drain_embeddings", fake_drain_embeddings)
+    monkeypatch.setattr(watch, "_pending_embedding_count", lambda *, skip_knowledge: 0, raising=False)
 
     summary = watch.run_watch(
         collection_name="second_brain",
@@ -160,6 +164,7 @@ def test_watch_continues_capped_embedding_batches_without_full_snapshots(monkeyp
         poll_interval=60,
         new_file_index_delay_seconds=600,
         changed_index_interval_seconds=86400,
+        pending_embed_interval_seconds=600,
         clock=lambda: now_values.pop(0),
     )
 
@@ -169,3 +174,89 @@ def test_watch_continues_capped_embedding_batches_without_full_snapshots(monkeyp
     assert summary["new_file_scans"] == 2
     assert summary["embed_batches"] == 2
     assert summary["embeddings_written"] == 6
+
+
+def test_watch_periodically_drains_external_pending_embeddings(monkeypatch) -> None:
+    path_snapshots = [{"second_brain": {"existing.md"}}]
+    now_values = [0.0, 300.0]
+    pending_counts = [12]
+    embed_calls: list[dict[str, int]] = []
+
+    _forbid_full_snapshots(monkeypatch)
+    monkeypatch.setattr(watch.time, "sleep", lambda _: None)
+    monkeypatch.setattr(watch, "_build_path_snapshot", lambda **_: path_snapshots[-1], raising=False)
+    monkeypatch.setattr(
+        watch,
+        "_pending_embedding_count",
+        lambda *, skip_knowledge: pending_counts.pop(0) if pending_counts else 0,
+        raising=False,
+    )
+
+    def fake_drain_embeddings(**kwargs) -> dict[str, int]:
+        embed_calls.append({"embed_limit": kwargs["embed_limit"], "max_embed_batches": kwargs["max_embed_batches"]})
+        return {"embed_batches": 1, "embeddings_written": 12, "pending_remaining": 0}
+
+    monkeypatch.setattr(watch, "_drain_embeddings", fake_drain_embeddings)
+
+    summary = watch.run_watch(
+        collection_name="second_brain",
+        no_initial_sync=True,
+        max_loops=2,
+        poll_interval=60,
+        new_file_index_delay_seconds=600,
+        changed_index_interval_seconds=86400,
+        pending_embed_interval_seconds=300,
+        embed_limit=200,
+        max_embed_batches=2,
+        clock=lambda: now_values.pop(0),
+    )
+
+    assert embed_calls == [{"embed_limit": 200, "max_embed_batches": 2}]
+    assert summary["new_file_scans"] == 0
+    assert summary["path_index_runs"] == 0
+    assert summary["changed_index_runs"] == 0
+    assert summary["embed_batches"] == 1
+    assert summary["embeddings_written"] == 12
+
+
+def test_watch_advances_pending_check_receipt_after_drain(monkeypatch) -> None:
+    path_snapshots = [{"second_brain": {"existing.md"}}]
+    now_values = [0.0, 300.0]
+    pending_counts = [8]
+    state_payloads: list[dict] = []
+
+    _forbid_full_snapshots(monkeypatch)
+    monkeypatch.setattr(watch.time, "sleep", lambda _: None)
+    monkeypatch.setattr(watch, "_build_path_snapshot", lambda **_: path_snapshots[-1], raising=False)
+    monkeypatch.setattr(
+        watch,
+        "_pending_embedding_count",
+        lambda *, skip_knowledge: pending_counts.pop(0) if pending_counts else 0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        watch,
+        "_drain_embeddings",
+        lambda **_: {"embed_batches": 1, "embeddings_written": 8, "pending_remaining": 0},
+    )
+
+    def fake_record_background_index_state(**kwargs):
+        state_payloads.append(kwargs)
+
+    monkeypatch.setattr("vaultq.background_index.record_background_index_state", fake_record_background_index_state)
+
+    watch.run_watch(
+        collection_name="second_brain",
+        no_initial_sync=True,
+        max_loops=2,
+        poll_interval=60,
+        new_file_index_delay_seconds=600,
+        changed_index_interval_seconds=86400,
+        pending_embed_interval_seconds=300,
+        state_name="background_index:second_brain",
+        clock=lambda: now_values.pop(0),
+    )
+
+    assert state_payloads
+    assert state_payloads[-1]["next_pending_embed_at"] is not None
+    assert state_payloads[-1]["summary"]["embeddings_written"] == 8

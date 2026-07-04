@@ -20,8 +20,9 @@ set "VQ_BACKGROUND_INDEX_POLL_SECONDS=300"
 set "VQ_BACKGROUND_INDEX_INITIAL_DELAY_SECONDS=60"
 set "VQ_BACKGROUND_NEW_FILE_DELAY_SECONDS=600"
 set "VQ_BACKGROUND_CHANGED_INDEX_SECONDS=86400"
-set "VQ_BACKGROUND_EMBED_LIMIT=100"
-set "VQ_BACKGROUND_MAX_EMBED_BATCHES=1"
+set "VQ_BACKGROUND_PENDING_EMBED_SECONDS=300"
+set "VQ_BACKGROUND_EMBED_LIMIT=200"
+set "VQ_BACKGROUND_MAX_EMBED_BATCHES=2"
 
 cd /d "%ROOT%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
@@ -33,4 +34,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 if %ERRORLEVEL% EQU 0 exit /b 0
 if %ERRORLEVEL% GEQ 2 exit /b %ERRORLEVEL%
 
-"%PY%" -m vaultq.cli mcp --transport %MCP_TRANSPORT% --host %MCP_HOST% --port %MCP_PORT% --no-banner
+powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command ^
+  "$argsList = @('-m','vaultq.cli','mcp','--transport','%MCP_TRANSPORT%','--host','%MCP_HOST%','--port','%MCP_PORT%','--no-banner'); " ^
+  "Start-Process -FilePath '%PY%' -ArgumentList $argsList -WorkingDirectory '%ROOT%' -WindowStyle Hidden"
+exit /b %ERRORLEVEL%

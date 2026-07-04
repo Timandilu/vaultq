@@ -28,7 +28,8 @@ def build_background_state_payload(
     summary: Dict[str, Any],
     next_new_file_scan_at: datetime | None,
     next_changed_refresh_at: datetime | None,
-    last_error: Optional[Dict[str, Any]],
+    next_pending_embed_at: datetime | None = None,
+    last_error: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     return {
         "kind": BACKGROUND_INDEX_KIND,
@@ -39,6 +40,7 @@ def build_background_state_payload(
         "summary": dict(summary),
         "next_new_file_scan_at": _iso(next_new_file_scan_at),
         "next_changed_refresh_at": _iso(next_changed_refresh_at),
+        "next_pending_embed_at": _iso(next_pending_embed_at),
         "last_error": last_error,
     }
 
@@ -51,6 +53,7 @@ def record_background_index_state(
     summary: Dict[str, Any],
     next_new_file_scan_at: datetime | None = None,
     next_changed_refresh_at: datetime | None = None,
+    next_pending_embed_at: datetime | None = None,
     last_error: Optional[Dict[str, Any]] = None,
     name: str | None = None,
 ) -> Dict[str, Any]:
@@ -62,6 +65,7 @@ def record_background_index_state(
         summary=summary,
         next_new_file_scan_at=next_new_file_scan_at,
         next_changed_refresh_at=next_changed_refresh_at,
+        next_pending_embed_at=next_pending_embed_at,
         last_error=last_error,
     )
     state_name = name or background_state_name(collection_name)

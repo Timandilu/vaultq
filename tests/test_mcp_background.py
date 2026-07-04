@@ -20,6 +20,7 @@ def test_background_index_settings_use_low_impact_defaults(monkeypatch) -> None:
         "VQ_BACKGROUND_INDEX_POLL_SECONDS",
         "VQ_BACKGROUND_NEW_FILE_DELAY_SECONDS",
         "VQ_BACKGROUND_CHANGED_INDEX_SECONDS",
+        "VQ_BACKGROUND_PENDING_EMBED_SECONDS",
         "VQ_BACKGROUND_EMBED_LIMIT",
         "VQ_BACKGROUND_MAX_EMBED_BATCHES",
     ):
@@ -34,4 +35,5 @@ def test_background_index_settings_use_low_impact_defaults(monkeypatch) -> None:
         "changed_index_interval_seconds": 86400,
         "embed_limit": 100,
         "max_embed_batches": 1,
+        "pending_embed_interval_seconds": 300,
     }

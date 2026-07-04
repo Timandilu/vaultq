@@ -21,6 +21,7 @@ def test_background_state_payload_is_db_status_shaped() -> None:
         },
         next_new_file_scan_at=datetime(2026, 6, 4, 12, 10, tzinfo=timezone.utc),
         next_changed_refresh_at=datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc),
+        next_pending_embed_at=datetime(2026, 6, 4, 12, 5, tzinfo=timezone.utc),
         last_error=None,
     )
 
@@ -31,4 +32,5 @@ def test_background_state_payload_is_db_status_shaped() -> None:
     assert payload["summary"]["path_index_runs"] == 2
     assert payload["next_new_file_scan_at"] == "2026-06-04T12:10:00+00:00"
     assert payload["next_changed_refresh_at"] == "2026-06-05T12:00:00+00:00"
+    assert payload["next_pending_embed_at"] == "2026-06-04T12:05:00+00:00"
     assert payload["last_error"] is None

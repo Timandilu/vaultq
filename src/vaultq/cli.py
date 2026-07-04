@@ -349,6 +349,7 @@ def _cmd_watch(args) -> int:
         max_embed_batches=args.max_embed_batches,
         new_file_index_delay_seconds=args.new_file_index_delay_seconds,
         changed_index_interval_seconds=args.changed_index_interval_seconds,
+        pending_embed_interval_seconds=args.pending_embed_interval_seconds,
         once=args.once,
         no_initial_sync=args.no_initial_sync,
         max_loops=args.max_loops,
@@ -632,6 +633,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=_env_float("VQ_BACKGROUND_CHANGED_INDEX_SECONDS", 86400.0),
         help="Minimum interval before refreshing changed/deleted-file chunks with a full incremental index",
+    )
+    watch_parser.add_argument(
+        "--pending-embed-interval-seconds",
+        type=float,
+        default=_env_float("VQ_BACKGROUND_PENDING_EMBED_SECONDS", 300.0),
+        help="Cadence for checking pending embeddings left by other processes; use 0 to disable",
     )
     watch_parser.add_argument("--once", action="store_true", help="Run a single watch cycle and exit")
     watch_parser.add_argument(

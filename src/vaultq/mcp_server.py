@@ -32,9 +32,10 @@ MCP_INSTRUCTIONS = (
     "Use vaultq_capture() only for agent-authored notes under the configured AI workspace.\n"
     "Use vaultq_agent_prepare() to prepare the disabled reversible review/promote runtime; it does not start a background worker.\n"
     "Use vaultq_agent_maintain() for one autonomous, reversible self-maintenance pass inside the agent workspace.\n"
-    "When VQ_SELF_MAINTAIN_INTERVAL_SECONDS is enabled, the MCP process also runs a state-gated self-maintenance loop that only acts after agent workspace changes.\n"
-    "When VQ_BACKGROUND_INDEX_COLLECTION is set, the MCP process runs low-impact background upkeep: no startup full index, path-only new-file discovery on a slow cadence, changed chunks daily.\n"
-    "Always cite the collection and relative path when answering from retrieved notes."
+"When VQ_SELF_MAINTAIN_INTERVAL_SECONDS is enabled, the MCP process also runs a state-gated self-maintenance loop that only acts after agent workspace changes.\n"
+"When VQ_BACKGROUND_INDEX_COLLECTION is set, the MCP process runs low-impact background upkeep: no startup full index, path-only new-file discovery on a slow cadence, changed chunks daily, and 5-minute pending-embedding drains.\n"
+"Do not manually wait on or drain pending embeddings unless the user explicitly needs same-turn semantic retrieval of newly written material.\n"
+"Always cite the collection and relative path when answering from retrieved notes."
 )
 
 CONFIG_DIR_NAME = ".vaultq"
@@ -112,6 +113,7 @@ def _background_index_settings() -> Dict[str, int | str] | None:
         collection_name = (os.getenv("VQ_SELF_MAINTAIN_COLLECTION") or "").strip()
     if not collection_name:
         return None
+    pending_embed_interval = _env_int("VQ_BACKGROUND_PENDING_EMBED_SECONDS", 300)
     return {
         "collection_name": collection_name,
         "poll_interval": max(60, _env_int("VQ_BACKGROUND_INDEX_POLL_SECONDS", 300)),
@@ -119,6 +121,7 @@ def _background_index_settings() -> Dict[str, int | str] | None:
         "changed_index_interval_seconds": max(300, _env_int("VQ_BACKGROUND_CHANGED_INDEX_SECONDS", 86400)),
         "embed_limit": max(1, _env_int("VQ_BACKGROUND_EMBED_LIMIT", 100)),
         "max_embed_batches": max(0, _env_int("VQ_BACKGROUND_MAX_EMBED_BATCHES", 1)),
+        "pending_embed_interval_seconds": 0 if pending_embed_interval <= 0 else max(60, pending_embed_interval),
     }
 
 
@@ -188,6 +191,7 @@ def _start_background_index_worker() -> threading.Thread | None:
                 "changed_index_interval_seconds": int(settings["changed_index_interval_seconds"]),
                 "embed_limit": int(settings["embed_limit"]),
                 "max_embed_batches": int(settings["max_embed_batches"]),
+                "pending_embed_interval_seconds": int(settings["pending_embed_interval_seconds"]),
             },
             name=state_name,
         )
@@ -209,6 +213,7 @@ def _start_background_index_worker() -> threading.Thread | None:
                     max_embed_batches=int(settings["max_embed_batches"]),
                     new_file_index_delay_seconds=float(settings["new_file_index_delay_seconds"]),
                     changed_index_interval_seconds=float(settings["changed_index_interval_seconds"]),
+                    pending_embed_interval_seconds=float(settings["pending_embed_interval_seconds"]),
                     no_initial_sync=True,
                     state_name=state_name or None,
                     state_worker="mcp",
@@ -411,7 +416,7 @@ def _index_write_result(result: Dict[str, Any], *, collection_name: str = "") ->
         result["indexed"] = stats.documents_indexed > 0
         result["index_stats"] = stats.__dict__
         if result["indexed"]:
-            result["next_step"] = "local title/keyword retrieval is available; run `vq embed --limit 100` when semantic retrieval is needed"
+            result["next_step"] = "local title/keyword retrieval is available; background embedding will handle semantic freshness unless same-turn semantic retrieval is required"
     except Exception as exc:
         result["indexed"] = False
         result["index_error"] = {

@@ -229,6 +229,7 @@ Useful watch flags:
 - `--interval 300` to control the cheap scheduler wakeup; this does not scan the vault unless a slower cadence is due
 - `--new-file-index-delay-seconds 600` to run path-only new-file discovery and batch newly created markdown files
 - `--changed-index-interval-seconds 86400` to refresh edited/deleted-file chunks at most daily
+- `--pending-embed-interval-seconds 300` to check for pending embeddings left by other processes and drain them in the background
 - `--embed-limit 100` to cap one embed batch
 - `--max-embed-batches 1` to control how aggressively the queue drains per cycle
 - `--with-knowledge` to also run grounded knowledge extraction during watch indexing
@@ -242,7 +243,7 @@ Watch mode is the operational bridge between one-shot batch ingest and a continu
 - it uses a path-only filesystem scan on the new-file cadence instead of statting every markdown file every poll
 - it indexes newly discovered files together and then embeds the resulting chunks in bounded batches
 - it refreshes changed/deleted-file chunks through the deletion-aware `vq index` path at most daily
-- it drains pending embeddings in bounded batches and schedules later follow-up batches when vectors remain
+- it drains pending embeddings in bounded batches, including vectors left behind by foreground index/write commands, and schedules later follow-up batches when vectors remain
 - it works for arbitrary vault roots because the watcher only relies on registered collection paths
 
 ### Watch Loop
@@ -330,7 +331,7 @@ The MCP surface exposes retrieval tools plus policy-gated agent-write tools. Wri
 - `vaultq_think`: creates a lightweight cited synthesis from retrieval results
 - `vaultq_maintain`: inspects the AI workspace and can write a maintenance report
 
-When `VQ_BACKGROUND_INDEX_COLLECTION` is set for the MCP process, VaultQ also starts a low-impact background upkeep worker. The worker starts from a path-only filesystem baseline, avoids a full startup index, wakes cheaply every 5 minutes by default, discovers new markdown files with a path-only scan every 10 minutes, refreshes changed/deleted-file chunks on the configured daily interval using stored file size/mtime metadata, and uses small embed batches so retrieval freshness does not take over the machine. The worker writes status into Postgres, visible through `vaultq_background_status` or `vq background status --json`.
+When `VQ_BACKGROUND_INDEX_COLLECTION` is set for the MCP process, VaultQ also starts a low-impact background upkeep worker. The worker starts from a path-only filesystem baseline, avoids a full startup index, wakes cheaply every 5 minutes by default, discovers new markdown files with a path-only scan every 10 minutes, checks for pending embeddings every 5 minutes, refreshes changed/deleted-file chunks on the configured daily interval using stored file size/mtime metadata, and uses small embed batches so retrieval freshness does not take over the machine. The worker writes status into Postgres, visible through `vaultq_background_status` or `vq background status --json`.
 
 When `VQ_SELF_MAINTAIN_INTERVAL_SECONDS` is set above zero, the MCP process also
 starts the official state-gated self-maintenance loop. The Windows
@@ -484,7 +485,7 @@ The main environment contract is:
 | Optional LLM extraction | `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_TIMEOUT`, `LLM_RETRIES`, `LLM_TPM_LIMIT` |
 | Runtime location | `VQ_CONFIG_DIR`, `VQ_ENV_FILE` |
 | MCP-tied self-maintenance | `VQ_SELF_MAINTAIN_COLLECTION`, `VQ_SELF_MAINTAIN_INTERVAL_SECONDS`, `VQ_SELF_MAINTAIN_INITIAL_DELAY_SECONDS`, `VQ_SELF_MAINTAIN_MAX_ACTIONS`, `VQ_SELF_MAINTAIN_STATE_FILE` |
-| MCP-tied background index | `VQ_BACKGROUND_INDEX_COLLECTION`, `VQ_BACKGROUND_INDEX_ENABLED`, `VQ_BACKGROUND_INDEX_POLL_SECONDS`, `VQ_BACKGROUND_INDEX_INITIAL_DELAY_SECONDS`, `VQ_BACKGROUND_NEW_FILE_DELAY_SECONDS`, `VQ_BACKGROUND_CHANGED_INDEX_SECONDS`, `VQ_BACKGROUND_EMBED_LIMIT`, `VQ_BACKGROUND_MAX_EMBED_BATCHES` |
+| MCP-tied background index | `VQ_BACKGROUND_INDEX_COLLECTION`, `VQ_BACKGROUND_INDEX_ENABLED`, `VQ_BACKGROUND_INDEX_POLL_SECONDS`, `VQ_BACKGROUND_INDEX_INITIAL_DELAY_SECONDS`, `VQ_BACKGROUND_NEW_FILE_DELAY_SECONDS`, `VQ_BACKGROUND_CHANGED_INDEX_SECONDS`, `VQ_BACKGROUND_PENDING_EMBED_SECONDS`, `VQ_BACKGROUND_EMBED_LIMIT`, `VQ_BACKGROUND_MAX_EMBED_BATCHES` |
 
 See [.env.example](./.env.example) for the current full set of defaults.
 

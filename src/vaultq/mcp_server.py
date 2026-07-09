@@ -19,6 +19,7 @@ MCP_INSTRUCTIONS = (
     "You have access to a markdown-vault retrieval system.\n"
     "Use vaultq_query() for the highest-quality hybrid retrieval path.\n"
     "Use vaultq_query(mode='focused') when you need concise, source-diverse related-work results without neighbor-window expansion.\n"
+    "Use vaultq_query(view='minimal') for compact answers and view='debug' for retrieval internals.\n"
     "Use vaultq_related_work() before creating a new idea note when you need existing connected work and a suggested existing home.\n"
     "Use vaultq_semantic_clusters() when you need seed notes clustered by shared semantic anchors across the indexed corpus.\n"
     "Use vaultq_search() for keyword-only lookup.\n"
@@ -511,33 +512,33 @@ def build_mcp() -> FastMCP:
         )
 
     @mcp.tool(name="vaultq_search")
-    def vaultq_search(query: str, limit: int = 5) -> Dict[str, Any]:
+    def vaultq_search(query: str, limit: int = 5, view: str = "default") -> Dict[str, Any]:
         """Run keyword-only retrieval over the indexed markdown vault."""
 
         def run() -> Dict[str, Any]:
             from vaultq.search import search as search_records
 
-            return search_records(query=query, limit=_normalize_limit(limit), retrieval_mode="keyword")
+            return search_records(query=query, limit=_normalize_limit(limit), retrieval_mode="keyword", view=view)
 
         return _run_operation(
             "vaultq_search",
-            {"query": query, "limit": limit},
+            {"query": query, "limit": limit, "view": view},
             run,
             hint="Check the query text, initialized schema, and configured Postgres connection.",
         )
 
     @mcp.tool(name="vaultq_query")
-    def vaultq_query(query: str, limit: int = 5, mode: str = "hybrid") -> Dict[str, Any]:
-        """Run VaultQ retrieval with title, keyword, semantic, and optional rerank lanes. Use mode='focused' for concise source-diverse results."""
+    def vaultq_query(query: str, limit: int = 5, mode: str = "hybrid", view: str = "default") -> Dict[str, Any]:
+        """Run VaultQ retrieval. Use view='minimal' for compact output and view='debug' for retrieval internals."""
 
         def run() -> Dict[str, Any]:
             from vaultq.search import search as search_records
 
-            return search_records(query=query, limit=_normalize_limit(limit), retrieval_mode=mode)
+            return search_records(query=query, limit=_normalize_limit(limit), retrieval_mode=mode, view=view)
 
         return _run_operation(
             "vaultq_query",
-            {"query": query, "limit": limit, "mode": mode},
+            {"query": query, "limit": limit, "mode": mode, "view": view},
             run,
             hint="Check that Postgres, Qdrant, and the embedding/rerank provider settings are available.",
         )

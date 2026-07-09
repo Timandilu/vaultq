@@ -601,66 +601,142 @@ def _diversify_by_document(
     }
 
 
-def result_contract(point: Dict[str, Any], include_metadata: bool = True) -> Dict[str, Any]:
+RESULT_VIEWS = {"default", "minimal", "debug"}
+
+
+def _normalize_result_view(view: str | None) -> str:
+    normalized = (view or "default").strip().lower()
+    if normalized in {"full", "verbose"}:
+        return "debug"
+    if normalized in {"compact", "normal"}:
+        return "default"
+    if normalized not in RESULT_VIEWS:
+        return "default"
+    return normalized
+
+
+def _shape_search_response(result: Dict[str, Any], view: str) -> Dict[str, Any]:
+    view = _normalize_result_view(view)
+    if view == "debug":
+        return result
+    if view == "minimal":
+        return {
+            "query": result.get("query", ""),
+            "retrieval_mode": result.get("retrieval_mode", ""),
+            "results": result.get("results", []),
+        }
+
+    shaped = {
+        "query": result.get("query", ""),
+        "retrieval_mode": result.get("retrieval_mode", ""),
+        "results": result.get("results", []),
+        "elapsed_ms": result.get("elapsed_ms", 0),
+    }
+    if result.get("warnings"):
+        shaped["warnings"] = result["warnings"]
+    return shaped
+
+
+def result_contract(
+    point: Dict[str, Any],
+    include_metadata: Optional[bool] = None,
+    view: str = "default",
+) -> Dict[str, Any]:
     payload = dict(point.get("payload", {}))
+    result_view = _normalize_result_view(view)
+    if include_metadata is True:
+        result_view = "debug"
+    elif include_metadata is False and result_view == "debug":
+        result_view = "default"
+
+    text = payload.get("window_text") or payload.get("text") or payload.get("raw_text") or ""
+    start_line = payload.get("start_line")
+    end_line = payload.get("end_line")
+    evidence_start_line = payload.get("window_start_line") or start_line
+    evidence_end_line = payload.get("window_end_line") or end_line
+
+    if result_view == "minimal":
+        return {
+            "id": str(point.get("id") or ""),
+            "score": float(point.get("score") or 0.0),
+            "rel_path": payload.get("rel_path") or "",
+            "title": payload.get("title") or "",
+            "heading_path": payload.get("heading_path") or "",
+            "start_line": evidence_start_line,
+            "end_line": evidence_end_line,
+            "text": text,
+        }
+
     result = {
         "id": str(point.get("id") or ""),
         "score": float(point.get("score") or 0.0),
-        "record_type": payload.get("record_type") or "",
-        "doc_type": payload.get("doc_type") or payload.get("object_type") or "",
-        "collection_name": payload.get("collection_name") or "",
         "rel_path": payload.get("rel_path") or "",
         "title": payload.get("title") or "",
         "heading_path": payload.get("heading_path") or "",
-        "knowledge_title": payload.get("knowledge_title") or "",
-        "chunk_index": payload.get("chunk_index"),
-        "start_line": payload.get("start_line"),
-        "end_line": payload.get("end_line"),
-        "text": payload.get("window_text") or payload.get("text") or payload.get("raw_text") or "",
+        "start_line": start_line,
+        "end_line": end_line,
+        "text": text,
         "evidence": {
-            "collection_name": payload.get("collection_name") or "",
             "rel_path": payload.get("rel_path") or "",
-            "start_line": payload.get("window_start_line") or payload.get("start_line"),
-            "end_line": payload.get("window_end_line") or payload.get("end_line"),
-            "retrieval_lanes": payload.get("retrieval_lanes") or [],
+            "start_line": evidence_start_line,
+            "end_line": evidence_end_line,
         },
     }
-    if include_metadata:
-        metadata: Dict[str, Any] = {}
-        for key in (
-            "section_title",
-            "segment_summary",
-            "document_summary",
-            "contexts",
-            "graph_adjacency_hits",
-            "graph_adjacency_boost",
-            "graph_session_prefix",
-            "graph_session_demoted",
-            "graph_session_demote",
-            "source_class",
-            "session_policy",
-            "session_original_score",
-            "session_effective_score",
-            "session_rerank",
-            "window_start_chunk_index",
-            "window_end_chunk_index",
-            "window_start_line",
-            "window_end_line",
-            "retrieval_lanes",
-        ):
-            value = payload.get(key)
-            if value not in (None, "", [], {}):
-                metadata[key] = value
-        result["metadata"] = metadata
+    if result_view != "debug":
+        return result
+
+    result.update(
+        {
+            "record_type": payload.get("record_type") or "",
+            "doc_type": payload.get("doc_type") or payload.get("object_type") or "",
+            "collection_name": payload.get("collection_name") or "",
+            "knowledge_title": payload.get("knowledge_title") or "",
+            "chunk_index": payload.get("chunk_index"),
+            "evidence": {
+                "collection_name": payload.get("collection_name") or "",
+                "rel_path": payload.get("rel_path") or "",
+                "start_line": evidence_start_line,
+                "end_line": evidence_end_line,
+                "retrieval_lanes": payload.get("retrieval_lanes") or [],
+            },
+        }
+    )
+    metadata: Dict[str, Any] = {}
+    for key in (
+        "section_title",
+        "segment_summary",
+        "document_summary",
+        "contexts",
+        "graph_adjacency_hits",
+        "graph_adjacency_boost",
+        "graph_session_prefix",
+        "graph_session_demoted",
+        "graph_session_demote",
+        "source_class",
+        "session_policy",
+        "session_original_score",
+        "session_effective_score",
+        "session_rerank",
+        "window_start_chunk_index",
+        "window_end_chunk_index",
+        "window_start_line",
+        "window_end_line",
+        "retrieval_lanes",
+    ):
+        value = payload.get(key)
+        if value not in (None, "", [], {}):
+            metadata[key] = value
+    result["metadata"] = metadata
     return result
 
 
-def search(query: str, limit: int = 5, retrieval_mode: str = "hybrid") -> Dict[str, Any]:
+def search(query: str, limit: int = 5, retrieval_mode: str = "hybrid", view: str = "default") -> Dict[str, Any]:
     retrieval_mode = (retrieval_mode or "hybrid").strip().lower()
+    result_view = _normalize_result_view(view)
     if retrieval_mode == "balanced":
         retrieval_mode = "hybrid"
     if not query or not query.strip():
-        return {"query": query, "retrieval_mode": retrieval_mode, "results": []}
+        return _shape_search_response({"query": query, "retrieval_mode": retrieval_mode, "results": []}, result_view)
 
     started = time.perf_counter()
     if retrieval_mode == "keyword":
@@ -674,7 +750,7 @@ def search(query: str, limit: int = 5, retrieval_mode: str = "hybrid") -> Dict[s
         result = {
             "query": query,
             "retrieval_mode": retrieval_mode,
-            "results": [result_contract(point) for point in points],
+            "results": [result_contract(point, view=result_view) for point in points],
             "timings": {
                 "keyword_ms": int((title_started - keyword_started) * 1000),
                 "title_ms": int((time.perf_counter() - title_started) * 1000),
@@ -683,7 +759,7 @@ def search(query: str, limit: int = 5, retrieval_mode: str = "hybrid") -> Dict[s
         }
         if session_meta.get("seen"):
             result["session_policy"] = session_meta
-        return result
+        return _shape_search_response(result, result_view)
     if retrieval_mode == "title":
         title_started = time.perf_counter()
         raw_points = _tag_points(_title_search_postgres(query, limit), "title")
@@ -692,13 +768,13 @@ def search(query: str, limit: int = 5, retrieval_mode: str = "hybrid") -> Dict[s
         result = {
             "query": query,
             "retrieval_mode": retrieval_mode,
-            "results": [result_contract(point) for point in points],
+            "results": [result_contract(point, view=result_view) for point in points],
             "timings": {"title_ms": int((time.perf_counter() - title_started) * 1000)},
             "elapsed_ms": int((time.perf_counter() - started) * 1000),
         }
         if session_meta.get("seen"):
             result["session_policy"] = session_meta
-        return result
+        return _shape_search_response(result, result_view)
     if retrieval_mode == "semantic":
         semantic_started = time.perf_counter()
         raw_points = _tag_points(_semantic_search(query, limit), "semantic")
@@ -707,13 +783,13 @@ def search(query: str, limit: int = 5, retrieval_mode: str = "hybrid") -> Dict[s
         result = {
             "query": query,
             "retrieval_mode": retrieval_mode,
-            "results": [result_contract(point) for point in points],
+            "results": [result_contract(point, view=result_view) for point in points],
             "timings": {"semantic_ms": int((time.perf_counter() - semantic_started) * 1000)},
             "elapsed_ms": int((time.perf_counter() - started) * 1000),
         }
         if session_meta.get("seen"):
             result["session_policy"] = session_meta
-        return result
+        return _shape_search_response(result, result_view)
 
     timings: Dict[str, Any] = {}
     warnings: List[Dict[str, str]] = []
@@ -825,7 +901,7 @@ def search(query: str, limit: int = 5, retrieval_mode: str = "hybrid") -> Dict[s
         "query": query,
         "retrieval_mode": retrieval_mode,
         "strategy": strategy,
-        "results": [result_contract(point) for point in reranked],
+        "results": [result_contract(point, view=result_view) for point in reranked],
         "title_candidates": len(title_points),
         "keyword_candidates": len(keyword_points),
         "semantic_candidates": len(semantic_points),
@@ -840,7 +916,7 @@ def search(query: str, limit: int = 5, retrieval_mode: str = "hybrid") -> Dict[s
         result["session_policy"] = session_meta
     if warnings:
         result["warnings"] = warnings
-    return result
+    return _shape_search_response(result, result_view)
 
 
 def fetch(point_id: str) -> Dict[str, Any]:

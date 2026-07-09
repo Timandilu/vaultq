@@ -385,7 +385,7 @@ def _cmd_query(args, mode: str = "hybrid") -> int:
     from vaultq.search import search
 
     retrieval_mode = getattr(args, "mode", None) or mode
-    result = search(args.query, limit=args.limit, retrieval_mode=retrieval_mode)
+    result = search(args.query, limit=args.limit, retrieval_mode=retrieval_mode, view=getattr(args, "view", "default"))
     _print(result, as_json=args.json)
     return 0
 
@@ -740,6 +740,7 @@ def build_parser() -> argparse.ArgumentParser:
     query_parser.add_argument("query")
     query_parser.add_argument("-n", "--limit", type=int, default=5)
     query_parser.add_argument("--mode", choices=("fast", "focused", "balanced", "deep", "hybrid"), default="hybrid")
+    query_parser.add_argument("--view", choices=("default", "minimal", "debug"), default="default")
     query_parser.add_argument("--json", action="store_true")
     query_parser.set_defaults(func=_cmd_query)
 
@@ -769,12 +770,14 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser = sub.add_parser("search", help="Keyword search only")
     search_parser.add_argument("query")
     search_parser.add_argument("-n", "--limit", type=int, default=5)
+    search_parser.add_argument("--view", choices=("default", "minimal", "debug"), default="default")
     search_parser.add_argument("--json", action="store_true")
     search_parser.set_defaults(func=lambda args: _cmd_query(args, "keyword"))
 
     vsearch_parser = sub.add_parser("vsearch", help="Dense semantic search only")
     vsearch_parser.add_argument("query")
     vsearch_parser.add_argument("-n", "--limit", type=int, default=5)
+    vsearch_parser.add_argument("--view", choices=("default", "minimal", "debug"), default="default")
     vsearch_parser.add_argument("--json", action="store_true")
     vsearch_parser.set_defaults(func=lambda args: _cmd_query(args, "semantic"))
 

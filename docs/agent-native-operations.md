@@ -268,7 +268,7 @@ Use the Agent tab for operator-safe workspace maintenance. Use the Pipeline tab 
 The AI startup script launches VaultQ MCP:
 
 ```text
-C:\Users\Timan\Workspace\AI\start_all.bat
+C:\Users\<user>\Workspace\AI\start_all.bat
 ```
 
 VaultQ MCP endpoint:

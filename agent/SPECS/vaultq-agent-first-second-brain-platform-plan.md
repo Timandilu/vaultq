@@ -14,7 +14,7 @@
 
 ### Current VaultQ Baseline
 
-Verified local repo at `C:\Users\Timan\Workspace\AI\vaultq`, commit `1865db6c7eb11f0032f86b3bf8900d4ced4f6e1a`.
+Verified local repo at `C:\Users\<user>\Workspace\AI\vaultq`, commit `1865db6c7eb11f0032f86b3bf8900d4ced4f6e1a`.
 
 VaultQ currently has:
 
@@ -38,7 +38,7 @@ Current limitation: the agent can retrieve evidence, but cannot autonomously cre
 
 ### GBrain Capability Inventory
 
-Verified GBrain checkout at `C:\Users\Timan\AppData\Local\Temp\gbrain-codex-read`, commit `0bfe0d0c7ebda6f2ab706bbddc023b8c8db21647`.
+Verified GBrain checkout at `C:\Users\<user>\AppData\Local\Temp\gbrain-codex-read`, commit `0bfe0d0c7ebda6f2ab706bbddc023b8c8db21647`.
 
 GBrain has the following relevant surfaces:
 

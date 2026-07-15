@@ -26,19 +26,19 @@ Canonical promotions should stay explicit, reversible, and reviewable.
 VaultQ repo:
 
 ```text
-C:\Users\Timan\Workspace\AI\vaultq
+C:\Users\<user>\Workspace\AI\vaultq
 ```
 
 Second Brain collection:
 
 ```text
-C:\Users\Timan\Workspace\Second_Brain
+C:\Users\<user>\Workspace\Second_Brain
 ```
 
 Agent workspace:
 
 ```text
-C:\Users\Timan\Workspace\Second_Brain\14_Agent_Workspace
+C:\Users\<user>\Workspace\Second_Brain\14_Agent_Workspace
 ```
 
 HTTP MCP endpoint:
@@ -50,13 +50,13 @@ http://127.0.0.1:7073/mcp
 Start command:
 
 ```powershell
-C:\Users\Timan\Workspace\AI\vaultq\start_vaultq_mcp.bat
+C:\Users\<user>\Workspace\AI\vaultq\start_vaultq_mcp.bat
 ```
 
 The broader AI startup script starts VaultQ MCP through that batch file:
 
 ```powershell
-C:\Users\Timan\Workspace\AI\start_all.bat
+C:\Users\<user>\Workspace\AI\start_all.bat
 ```
 
 ## Agent Startup Protocol
@@ -64,7 +64,7 @@ C:\Users\Timan\Workspace\AI\start_all.bat
 Installed local skill:
 
 ```text
-C:\Users\Timan\.agents\skills\vaultq-agent-workspace\SKILL.md
+C:\Users\<user>\.agents\skills\vaultq-agent-workspace\SKILL.md
 ```
 
 At the start of a non-trivial vault task, an agent should:

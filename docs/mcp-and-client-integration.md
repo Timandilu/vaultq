@@ -13,13 +13,13 @@ http://127.0.0.1:7073/mcp
 Start command:
 
 ```powershell
-C:\Users\Timan\Workspace\AI\vaultq\start_vaultq_mcp.bat
+C:\Users\<user>\Workspace\AI\vaultq\start_vaultq_mcp.bat
 ```
 
 The AI startup script already includes VaultQ:
 
 ```text
-C:\Users\Timan\Workspace\AI\start_all.bat
+C:\Users\<user>\Workspace\AI\start_all.bat
 ```
 
 ## Health Check
@@ -177,7 +177,7 @@ url = "http://127.0.0.1:7073/mcp"
 Location:
 
 ```text
-C:\Users\Timan\.codex\config.toml
+C:\Users\<user>\.codex\config.toml
 ```
 
 ## Antigravity
@@ -196,7 +196,7 @@ Antigravity config should contain both `url` and `serverURL` for compatibility:
 Location:
 
 ```text
-C:\Users\Timan\AppData\Roaming\Antigravity\User\mcp.json
+C:\Users\<user>\AppData\Roaming\Antigravity\User\mcp.json
 ```
 
 ## Failure Modes
@@ -211,8 +211,8 @@ Start manually:
 
 ```powershell
 Start-Process `
-  -FilePath 'C:\Users\Timan\Workspace\AI\vaultq\start_vaultq_mcp.bat' `
-  -WorkingDirectory 'C:\Users\Timan\Workspace\AI\vaultq' `
+  -FilePath 'C:\Users\<user>\Workspace\AI\vaultq\start_vaultq_mcp.bat' `
+  -WorkingDirectory 'C:\Users\<user>\Workspace\AI\vaultq' `
   -WindowStyle Hidden
 ```
 

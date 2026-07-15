@@ -20,7 +20,7 @@ RERANKER_MODEL=rerank-2.5
 VaultQ can borrow provider settings from another MCP env file using:
 
 ```text
-VQ_EMBED_ENV_FILE=C:\Users\Timan\Workspace\AI\copyvector_mcp\copyvector_embed_pipeline\.env
+VQ_EMBED_ENV_FILE=C:\Users\<user>\Workspace\AI\copyvector_mcp\copyvector_embed_pipeline\.env
 ```
 
 Only provider and rerank keys are imported from `VQ_EMBED_ENV_FILE`. Database, Qdrant, and unrelated service settings are not imported.
@@ -132,8 +132,8 @@ same-turn semantic retrieval requirement. In normal agent sessions, use
 background worker drain pending embeddings.
 
 ```powershell
-$env:VQ_CONFIG_DIR='C:\Users\Timan\Workspace\AI\vaultq\.vaultq'
-$env:VQ_ENV_FILE='C:\Users\Timan\Workspace\AI\vaultq\.env'
+$env:VQ_CONFIG_DIR='C:\Users\<user>\Workspace\AI\vaultq\.vaultq'
+$env:VQ_ENV_FILE='C:\Users\<user>\Workspace\AI\vaultq\.env'
 while ($true) {
   $status = python -m vaultq.cli status --json | ConvertFrom-Json
   if ($status.pending_chunk_embeddings -le 0) { break }

@@ -1,0 +1,8 @@
+.venv/
+.env
+.env.local
+.vaultq/
+tmp_vault/
+__pycache__/
+*.pyc
+*.egg-info/

@@ -560,7 +560,7 @@ src/vaultq/
 
 ## Current Status
 
-VaultQ has been rebuilt around:
+VaultQ has been improved around:
 
 - portable runtime config
 - Textual TUI as the default UX
@@ -572,4 +572,4 @@ VaultQ has been rebuilt around:
 - live provider diagnostics with endpoint mismatch detection
 - idempotent local bootstrap for Postgres + Qdrant
 
-The repo is now set up as a standalone markdown-vault ingestion and retrieval tool rather than a thin local script.
+The program is live and fully usable for agents and humans alike. 
